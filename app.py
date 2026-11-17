@@ -343,14 +343,38 @@ with st.sidebar:
             }])
             st.rerun()
 
-# ---------- Main Header & Quick-Add Natural Language Bar ----------
+# ---------- Main Header, Today Summary & Quick-Add Bar ----------
+df = load_user_df()
+today_local = pd.Timestamp(datetime.now(ZoneInfo("America/New_York")).date())
+
 st.title(get_greeting(display_name))
 
+# 1-2 sentence dynamic summary of what's due today
+if not df.empty:
+    due_today = df[(df["done"] == "no") & (df["date"].dt.normalize() == today_local)]
+    if due_today.empty:
+        next_up = df[(df["done"] == "no") & (df["date"].dt.normalize() > today_local)].sort_values("date")
+        if next_up.empty:
+            st.markdown("##### You have nothing due today and no upcoming deadlines on your schedule.")
+        else:
+            nxt = next_up.iloc[0]
+            st.markdown(f"##### You have nothing due today. Next up: **{nxt['title']}** ({nxt['course']}) on {nxt['date'].strftime('%b %d')}.")
+    elif len(due_today) == 1:
+        item = due_today.iloc[0]
+        st.markdown(f"##### You have **{item['title']}** ({item['course']}) due today ({item['hours']}h estimated).")
+    else:
+        prioritized = due_today.sort_values(["difficulty", "hours"], ascending=False)
+        top_item = prioritized.iloc[0]["title"]
+        others = len(due_today) - 1
+        noun = "item" if others == 1 else "items"
+        st.markdown(f"##### You have **{top_item}** and {others} other {noun} due today.")
+
+st.caption("**AI Quick-Add:** Type any assignment, exam, or shift in plain English below to automatically schedule it.")
 with st.form("quick_nl_form", clear_on_submit=True):
-    q_col1, q_col2 = st.columns([5, 1])
+    q_col1, q_col2 = st.columns([4, 1.3])
     nl_prompt = q_col1.text_input(
         "Quick Add (AI)",
-        placeholder="Type naturally: e.g., 'ITSC 3155 Midterm next Thursday takes 6 hours diff 5' or 'Work shift Friday 4 hours'",
+        placeholder="e.g., 'ITSC 3155 Midterm next Thursday takes 6 hours diff 5'",
         label_visibility="collapsed",
     )
     if q_col2.form_submit_button("✨ Quick Add", use_container_width=True) and nl_prompt.strip():
@@ -362,8 +386,9 @@ with st.form("quick_nl_form", clear_on_submit=True):
         except Exception as e:
             st.error(f"Could not parse quick add: {e}")
 
-df = load_user_df()
-
+if df.empty:
+    st.info("Your schedule is empty! Use the Quick-Add bar above or the sidebar to sync Canvas/Google Calendar or upload a syllabus.")
+    st.stop()
 if df.empty:
     st.info("Your schedule is empty! Use the Quick Add bar above or the sidebar to sync Canvas/Google Calendar or upload a syllabus.")
     st.stop()
