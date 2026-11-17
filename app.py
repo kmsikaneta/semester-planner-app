@@ -1,4 +1,3 @@
-import io
 import json
 import re
 from datetime import datetime, timedelta
@@ -15,9 +14,12 @@ from docx import Document
 from PIL import Image
 from google import genai
 from supabase import create_client
+from streamlit_calendar import calendar
 import streamlit as st
 
 st.set_page_config(page_title="Semester Planner", layout="wide")
+
+MODEL_ID = "gemini-3.8-flash"
 
 # Initialize Supabase client
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
@@ -74,11 +76,16 @@ if st.session_state["user"] is None:
 
     st.stop()
 
-# ---------- User Profile & Time-of-Day Greeting ----------
+# ---------- User Profile, Preferences & Time-of-Day Greeting ----------
 user = st.session_state["user"]
 user_id = user.id
 meta = user.user_metadata or {}
 display_name = meta.get("full_name") or user.email.split("@")[0].capitalize()
+
+# Load saved user calibration settings (stored cleanly in Supabase user_metadata)
+daily_capacity = float(meta.get("daily_capacity", 6.0))
+exam_spread = int(meta.get("exam_spread", 7))
+assign_spread = int(meta.get("assign_spread", 4))
 
 def get_greeting(name: str) -> str:
     now_local = datetime.now(ZoneInfo("America/New_York"))
@@ -91,7 +98,7 @@ def get_greeting(name: str) -> str:
         period = "Good Evening"
     return f"{period}, {name}"
 
-# ---------- Database & Parsing Helpers ----------
+# ---------- Database & AI Parsing Helpers ----------
 def load_user_df() -> pd.DataFrame:
     res = supabase.table("items").select("*").eq("user_id", user_id).execute()
     if not res.data:
@@ -106,7 +113,6 @@ def load_user_df() -> pd.DataFrame:
     return df
 
 def add_rows_dedup(new_rows: list[dict]) -> int:
-    """Inserts only rows that don't already match an existing (date, title) pair."""
     if not new_rows:
         return 0
     existing = load_user_df()
@@ -178,6 +184,26 @@ def parse_ics_url(ics_url: str) -> list[dict]:
         })
     return rows
 
+def parse_quick_natural_language(text: str) -> list[dict]:
+    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+    today_str = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d (%A)")
+    prompt = f"""
+    Today is {today_str}. Convert this student's natural-language note into a JSON array of 1 or more schedule items.
+    Return ONLY valid JSON with these exact keys:
+    - "course": inferred course code (e.g., "ITSC 3155", "Work", or "General")
+    - "date": "YYYY-MM-DD" resolved relative to today
+    - "title": clean task/event title
+    - "type": one of "exam", "assignment", "quiz", "reading", "recurring", "job"
+    - "hours": estimated hours (number, default 1.5 if unstated)
+    - "difficulty": integer 1 to 5 (default 3 if unstated)
+    - "done": "no"
+
+    Input: "{text}"
+    """
+    res = client.models.generate_content(model=MODEL_ID, contents=prompt)
+    raw = res.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    return json.loads(raw)
+
 def parse_syllabus_multimodal(uploaded_file=None, pasted_text: str = "", default_course: str = "") -> list[dict]:
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
     contents = []
@@ -215,8 +241,7 @@ def parse_syllabus_multimodal(uploaded_file=None, pasted_text: str = "", default
     if pasted_text.strip():
         contents.append(pasted_text.strip()[:18000])
 
-    # Inside parse_syllabus_multimodal:
-    response = client.models.generate_content(model="gemini-3.8-flash", contents=contents)
+    response = client.models.generate_content(model=MODEL_ID, contents=contents)
     raw = response.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(raw)
 
@@ -230,27 +255,38 @@ def generate_study_plan(df: pd.DataFrame, load_df: pd.DataFrame) -> str:
     peaks_summary = peak_days[["date", "intensity"]].to_dict(orient="records")
 
     prompt = f"""
-    You are an academic coach for a college student. Today is {today.strftime('%Y-%m-%d')}.
-    Here are their upcoming peak workload days (0-10 scale): {peaks_summary}
-    Here are their upcoming unfinished tasks for the next 14 days: {items_summary}
+    You are an academic coach for {display_name}. Today is {today.strftime('%Y-%m-%d')}.
+    Their target daily study capacity is {daily_capacity} hours/day.
+    Upcoming peak workload days (0-10 scale): {peaks_summary}
+    Upcoming unfinished tasks for the next 14 days: {items_summary}
 
     Create a concise, actionable day-by-day study plan for the next 7 days to flatten their peak crunch days.
-    Group recommendations by day, name exact courses and assignments, and suggest realistic hour blocks.
+    Group recommendations by day, name exact courses and assignments, and suggest realistic hour blocks within their {daily_capacity}h/day limit.
     """
-    # Inside generate_study_plan:
-    res = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
+    res = client.models.generate_content(model=MODEL_ID, contents=prompt)
     return res.text
 
 # ---------- Sidebar Controls ----------
 with st.sidebar:
     st.caption(f"Signed in as **{display_name}** ({user.email})")
 
-    with st.expander("Profile Settings"):
+    with st.expander("Profile & Capacity Calibration"):
         updated_name = st.text_input("Display Name", value=display_name)
-        if st.button("Save Name") and updated_name.strip():
-            res = supabase.auth.update_user({"data": {"full_name": updated_name.strip()}})
+        new_cap = st.slider("Max Daily Study Capacity (hrs)", 2.0, 14.0, daily_capacity, 0.5,
+                            help="Lower this if you work a part-time job or have heavy extracurriculars.")
+        new_exam_sp = st.slider("Exam Prep Spread (days before due)", 2, 14, exam_spread)
+        new_assign_sp = st.slider("Assignment Prep Spread (days before due)", 1, 10, assign_spread)
+        if st.button("Save Preferences"):
+            res = supabase.auth.update_user({
+                "data": {
+                    "full_name": updated_name.strip() or display_name,
+                    "daily_capacity": new_cap,
+                    "exam_spread": new_exam_sp,
+                    "assign_spread": new_assign_sp,
+                }
+            })
             st.session_state["user"] = res.user
-            st.success("Name updated!")
+            st.success("Preferences saved!")
             st.rerun()
 
     if st.button("Log Out"):
@@ -307,12 +343,29 @@ with st.sidebar:
             }])
             st.rerun()
 
-# ---------- Main Header & Greeting ----------
+# ---------- Main Header & Quick-Add Natural Language Bar ----------
 st.title(get_greeting(display_name))
+
+with st.form("quick_nl_form", clear_on_submit=True):
+    q_col1, q_col2 = st.columns([5, 1])
+    nl_prompt = q_col1.text_input(
+        "Quick Add (AI)",
+        placeholder="Type naturally: e.g., 'ITSC 3155 Midterm next Thursday takes 6 hours diff 5' or 'Work shift Friday 4 hours'",
+        label_visibility="collapsed",
+    )
+    if q_col2.form_submit_button("✨ Quick Add", use_container_width=True) and nl_prompt.strip():
+        try:
+            parsed_items = parse_quick_natural_language(nl_prompt.strip())
+            added = add_rows_dedup(parsed_items)
+            st.success(f"Added {added} item(s)!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not parse quick add: {e}")
+
 df = load_user_df()
 
 if df.empty:
-    st.info("Your schedule is empty! Use the sidebar to sync Canvas/Google Calendar, upload a syllabus (PDF, Word, or screenshot), or add an item manually.")
+    st.info("Your schedule is empty! Use the Quick Add bar above or the sidebar to sync Canvas/Google Calendar or upload a syllabus.")
     st.stop()
 
 # Course Filter Bar
@@ -324,9 +377,9 @@ if filtered_df.empty:
     st.warning("No items match your selected course filters.")
     st.stop()
 
-# ---------- Compute Time-Spread Workload & 0-10 Intensity ----------
+# ---------- Compute Calibrated Time-Spread Workload & 0-10 Intensity ----------
 filtered_df["effort"] = filtered_df["hours"] * (0.5 + filtered_df["difficulty"] * 0.25)
-SPREAD_DAYS = {"exam": 7, "assignment": 4}
+SPREAD_DAYS = {"exam": exam_spread, "assignment": assign_spread}
 daily_records = []
 
 for _, row in filtered_df.iterrows():
@@ -346,8 +399,9 @@ load_df = raw_daily.groupby("date", as_index=False)["load"].sum()
 full_range = pd.date_range(load_df["date"].min(), load_df["date"].max(), freq="D")
 load_df = load_df.set_index("date").reindex(full_range, fill_value=0.0).rename_axis("date").reset_index()
 
-MAX_REFERENCE_EFFORT = 15.0
-load_df["intensity"] = (load_df["load"] / MAX_REFERENCE_EFFORT * 10).clip(0, 10).round(1)
+# Scale 0-10 dynamically against the user's personal daily study capacity
+max_reference_effort = daily_capacity * 1.5
+load_df["intensity"] = (load_df["load"] / max_reference_effort * 10).clip(0, 10).round(1)
 peak_threshold = min(round(load_df["intensity"].mean() + load_df["intensity"].std(), 1), 9.5)
 
 def load_color(val):
@@ -359,8 +413,13 @@ def load_color(val):
 
 load_df["color"] = load_df["intensity"].apply(load_color)
 
-# ---------- Tabs Layout ----------
-tab_overview, tab_table, tab_coach = st.tabs(["📊 Workload Overview", "📝 Master Task Editor", "🧠 AI Study Coach"])
+# ---------- Navigation Tabs ----------
+tab_overview, tab_cal, tab_table, tab_coach = st.tabs([
+    "📊 Workload Overview",
+    "📅 Calendar Grid",
+    "📝 Master Task Editor",
+    "🧠 AI Study Coach",
+])
 
 with tab_overview:
     col_hdr, col_toggle = st.columns([3, 1])
@@ -369,7 +428,7 @@ with tab_overview:
     with col_toggle:
         chart_mode = st.radio("Chart View", ["Total Intensity Line", "Stacked by Course"], horizontal=True)
 
-    with st.expander("How to read your Workload Intensity Score (0–10)", expanded=False):
+    with st.expander(f"How to read your Workload Intensity Score (Calibrated to {daily_capacity}h/day capacity)", expanded=False):
         st.markdown("""
         * **0 – 2.9 (🟢 Light / Free):** Nothing due or light routine tasks; great time to get ahead or rest.
         * **3.0 – 6.4 (🟡 Moderate):** Steady classes, readings, or early assignment prep.
@@ -420,7 +479,7 @@ with tab_overview:
         st.plotly_chart(fig, use_container_width=True)
     else:
         course_daily = raw_daily.groupby(["date", "course"], as_index=False)["load"].sum()
-        course_daily["intensity"] = (course_daily["load"] / MAX_REFERENCE_EFFORT * 10).clip(0, 10).round(2)
+        course_daily["intensity"] = (course_daily["load"] / max_reference_effort * 10).clip(0, 10).round(2)
         fig_stack = px.area(
             course_daily,
             x="date",
@@ -437,7 +496,7 @@ with tab_overview:
         )
         st.plotly_chart(fig_stack, use_container_width=True)
 
-    # ---------- Daily Morning Brief ----------
+    # ---------- Daily Brief ----------
     st.subheader("Daily Brief")
     today = pd.Timestamp.now().normalize()
     c1, c2, c3 = st.columns(3)
@@ -478,9 +537,46 @@ with tab_overview:
             for _, r in completed.iterrows():
                 st.success(f"✓ [{r['course']}] {r['title']} ({r['date'].strftime('%b %d')})")
 
+with tab_cal:
+    st.subheader("Interactive Semester Calendar")
+    st.caption("Color-coded by difficulty: 🔴 High (4–5) • 🟡 Medium (3) • 🟢 Low (1–2) • ⚪ Completed")
+
+    cal_events = []
+    for _, r in filtered_df.iterrows():
+        if r["done"] == "yes":
+            bg = "#9ca3af"
+        elif r["difficulty"] >= 4:
+            bg = "#ef4444"
+        elif r["difficulty"] == 3:
+            bg = "#eab308"
+        else:
+            bg = "#22c55e"
+
+        cal_events.append({
+            "title": f"[{r['course']}] {r['title']} ({r['hours']}h)",
+            "start": r["date"].strftime("%Y-%m-%d"),
+            "end": r["date"].strftime("%Y-%m-%d"),
+            "backgroundColor": bg,
+            "borderColor": bg,
+        })
+
+    calendar(
+        events=cal_events,
+        options={
+            "initialView": "dayGridMonth",
+            "headerToolbar": {
+                "left": "prev,next today",
+                "center": "title",
+                "right": "dayGridMonth,listWeek",
+            },
+            "height": 620,
+        },
+        key="semester_calendar_grid",
+    )
+
 with tab_table:
     st.subheader("Edit, Re-tag, or Delete Schedule Items")
-    st.caption("Double-click any cell to edit course tags, dates, hours, or difficulty, check off completed work, or select rows to delete. Click **Save Changes** when finished.")
+    st.caption("Double-click any cell to edit course tags, dates, hours, or difficulty, check off completed work, or select rows to delete.")
 
     edit_df = filtered_df[["id", "done", "course", "date", "title", "type", "hours", "difficulty"]].sort_values("date").copy()
     edit_df["done"] = edit_df["done"] == "yes"
@@ -537,7 +633,7 @@ with tab_table:
 
 with tab_coach:
     st.subheader("AI Crunch-Week Study Plan Generator")
-    st.write("Analyze your upcoming red/yellow workload spikes and generate a day-by-day schedule to spread out heavy deadlines.")
+    st.write(f"Analyze your upcoming red/yellow workload spikes against your **{daily_capacity}h/day** study capacity and generate a day-by-day schedule.")
     if st.button("Generate My 7-Day Study Plan", type="primary"):
         with st.spinner("Analyzing your upcoming deadlines and workload peaks..."):
             try:
