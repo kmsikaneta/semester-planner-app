@@ -267,11 +267,38 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
 </style>
 """)
 
-# ---------- Authentication Gate ----------
+# ---------- Authentication Gate & Password Recovery ----------
 if "user" not in st.session_state:
     st.session_state["user"] = None
 if "session" not in st.session_state:
     st.session_state["session"] = None
+if "password_recovery_mode" not in st.session_state:
+    st.session_state["password_recovery_mode"] = False
+
+# Handle incoming password reset link (?code=... or ?token_hash=...&type=recovery)
+q_params = st.query_params
+if "code" in q_params and st.session_state["user"] is None:
+    try:
+        res = supabase.auth.exchange_code_for_session({"auth_code": q_params["code"]})
+        if res.user:
+            st.session_state["user"] = res.user
+            st.session_state["session"] = res.session
+            st.session_state["password_recovery_mode"] = True
+            st.query_params.clear()
+            st.rerun()
+    except Exception:
+        pass
+elif q_params.get("type") == "recovery" and "token_hash" in q_params and st.session_state["user"] is None:
+    try:
+        res = supabase.auth.verify_otp({"token_hash": q_params["token_hash"], "type": "recovery"})
+        if res.user:
+            st.session_state["user"] = res.user
+            st.session_state["session"] = res.session
+            st.session_state["password_recovery_mode"] = True
+            st.query_params.clear()
+            st.rerun()
+    except Exception:
+        pass
 
 if st.session_state["session"] is not None:
     supabase.auth.set_session(
@@ -279,11 +306,34 @@ if st.session_state["session"] is not None:
         st.session_state["session"].refresh_token,
     )
 
+# If user clicked a password reset email link, show the new password form first
+if st.session_state["user"] is not None and st.session_state.get("password_recovery_mode"):
+    st.title("Reset Your Password")
+    st.subheader("Enter a new password for your Semester Planner account")
+    with st.form("reset_new_pw_form"):
+        new_pw = st.text_input("New Password (min 6 characters)", type="password")
+        confirm_pw = st.text_input("Confirm New Password", type="password")
+        if st.form_submit_button("Update Password", type="primary"):
+            if len(new_pw) < 6:
+                st.error("Password must be at least 6 characters.")
+            elif new_pw != confirm_pw:
+                st.error("Passwords do not match.")
+            else:
+                try:
+                    res = supabase.auth.update_user({"password": new_pw})
+                    st.session_state["user"] = res.user
+                    st.session_state["password_recovery_mode"] = False
+                    st.success("Password updated! Taking you to your dashboard...")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not update password: {e}")
+    st.stop()
+
 if st.session_state["user"] is None:
     st.title("Semester Planner")
     st.subheader("Sign in or create an account to manage your semester workload")
 
-    tab_login, tab_signup = st.tabs(["Log In", "Sign Up"])
+    tab_login, tab_signup, tab_forgot = st.tabs(["Log In", "Sign Up", "Forgot Password"])
 
     with tab_login:
         with st.form("login_form"):
@@ -316,6 +366,23 @@ if st.session_state["user"] is None:
                         st.rerun()
                 except Exception as e:
                     st.error(f"Sign up failed: {e}")
+
+    with tab_forgot:
+        st.write("Enter the email address on your account and we will send you a password reset link.")
+        with st.form("forgot_password_form"):
+            reset_email = st.text_input("Account Email")
+            if st.form_submit_button("Send Password Reset Email"):
+                if not reset_email.strip():
+                    st.warning("Please enter your email address.")
+                else:
+                    try:
+                        supabase.auth.reset_password_for_email(
+                            reset_email.strip(),
+                            options={"redirect_to": "https://semester-planner.streamlit.app"},
+                        )
+                        st.success("Password reset email sent! Check your inbox (and spam folder) for the link.")
+                    except Exception as e:
+                        st.error(f"Could not send reset email: {e}")
 
     st.stop()
 
@@ -1323,6 +1390,32 @@ elif nav_page == "Courses":
                 st.rerun()
             except Exception as e:
                 st.error(f"Could not rename the course: {e}")
+
+    st.divider()
+    st.markdown("#### Delete a course category")
+    st.caption("Removes a course category and permanently deletes every task inside it.")
+    del1, del2 = st.columns([2, 2])
+    del_target = del1.selectbox("Course category to delete", all_courses, key="delete_course_select")
+    del_task_count = int((df["course"] == del_target).sum())
+    confirm_del = del2.checkbox(
+        f"Yes, delete {del_target} and all {del_task_count} task{'s' if del_task_count != 1 else ''}",
+        key="confirm_delete_course",
+    )
+    if st.button("Delete Category", type="secondary"):
+        if not confirm_del:
+            st.warning("Check the confirmation box first to delete this category.")
+        else:
+            try:
+                supabase.table("items").delete().eq("user_id", user_id).eq("course", del_target).execute()
+                updated_prefs = dict(course_prefs)
+                updated_prefs.pop(del_target, None)
+                updated_info = dict(course_info)
+                updated_info.pop(del_target, None)
+                save_profile_meta({"course_prefs": updated_prefs, "course_info": updated_info})
+                flash(f"Deleted {del_target} and its {del_task_count} task{'s' if del_task_count != 1 else ''}.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not delete category: {e}")
 
 elif nav_page == "Course Progress":
     st.subheader("Course Progress")
