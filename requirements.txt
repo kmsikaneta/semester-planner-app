@@ -6,3 +6,4 @@ recurring-ical-events
 requests
 pypdf
 google-genai
+supabase
