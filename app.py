@@ -2,6 +2,7 @@ import calendar as pycal
 import html as html_lib
 import json
 import re
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import numpy as np
@@ -22,7 +23,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Semester Planner", layout="wide", initial_sidebar_state="expanded")
 
-MODEL_ID = "gemini-3.8-flash"
+MODEL_FALLBACKS = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
 
 # Initialize Supabase client
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
@@ -233,6 +234,36 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     border-radius: 50%;
     display: inline-block;
 }
+.progress-track {
+    display: flex;
+    height: 14px;
+    border-radius: 999px;
+    background-color: #DFD6D8;
+    overflow: hidden;
+    margin: 6px 0 14px 0;
+}
+.progress-seg {
+    height: 100%;
+}
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px;
+}
+.stat-box {
+    background-color: #F7F3EE;
+    border-radius: 16px;
+    padding: 10px 14px;
+}
+.stat-num {
+    font-size: 1.2rem;
+    font-weight: 800;
+    color: #3E313B;
+}
+.stat-label {
+    font-size: 0.76rem;
+    color: #7D6B78;
+}
 </style>
 """)
 
@@ -299,22 +330,23 @@ daily_capacity = float(meta.get("daily_capacity", 6.0))
 exam_spread = int(meta.get("exam_spread", 7))
 assign_spread = int(meta.get("assign_spread", 4))
 
-# Per-course settings: {"MATH 2171": {"difficulty": 4, "custom": False, "color": "#D96B78"}}
 course_prefs = meta.get("course_prefs") or {}
 if not isinstance(course_prefs, dict):
     course_prefs = {}
 
-APP_META_KEYS = ["full_name", "daily_capacity", "exam_spread", "assign_spread", "course_prefs"]
+course_info = meta.get("course_info") or {}
+if not isinstance(course_info, dict):
+    course_info = {}
+
+APP_META_KEYS = ["full_name", "daily_capacity", "exam_spread", "assign_spread", "course_prefs", "course_info"]
 
 def save_profile_meta(updates: dict):
-    """Save profile settings, always sending every app setting so none get lost."""
     current = {k: meta.get(k) for k in APP_META_KEYS if meta.get(k) is not None}
     current.update(updates)
     res = supabase.auth.update_user({"data": current})
     st.session_state["user"] = res.user
 
 def flash(message: str, kind: str = "success"):
-    """Queue a message that survives the next rerun."""
     st.session_state["flash"] = (kind, message)
 
 def show_flash():
@@ -373,13 +405,12 @@ def render_mini_calendar(year: int, month: int, today_day: int, due_days: set[in
     parts.append("</table>")
     return "".join(parts)
 
-# ---------- Color Helpers (course difficulty: green = easy, red = hard) ----------
+# ---------- Color Helpers ----------
 EASY_RGB = (91, 179, 150)    # #5BB396
 MID_RGB = (229, 169, 59)     # #E5A93B
 HARD_RGB = (217, 107, 120)   # #D96B78
 
 def difficulty_to_color(difficulty) -> str:
-    """Map a 1-5 difficulty rating to a hex color on a green -> amber -> red scale."""
     try:
         t = (float(difficulty) - 1) / 4
     except (TypeError, ValueError):
@@ -393,13 +424,11 @@ def difficulty_to_color(difficulty) -> str:
     return "#{:02X}{:02X}{:02X}".format(*rgb)
 
 def safe_hex(value, fallback: str) -> str:
-    """Only allow #RRGGBB colors, since saved colors end up inside HTML."""
     if isinstance(value, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
         return value.upper()
     return fallback
 
 def readable_text(hex_color: str) -> str:
-    """Pick dark or white text so labels stay readable on any chosen color."""
     h = hex_color.lstrip("#")
     r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
     luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
@@ -409,7 +438,6 @@ def readable_text(hex_color: str) -> str:
 CODE_RE = re.compile(r"^([A-Za-z]{2,5})[\s_-]?(\d{4}[A-Za-z]?)$")
 
 def normalize_course(raw) -> str:
-    """Make course labels consistent: 'Math 2171' / 'math-2171' -> 'MATH 2171'."""
     raw = str(raw or "").strip()
     if not raw:
         return "General"
@@ -430,17 +458,14 @@ def detect_course_code(text: str) -> str:
         return "General"
     upper = text.upper()
 
-    # 1. Prefer STAT 3122 when cross-listed with MATH-3122 (e.g., 202680-MATH-3122-001:STAT-3122)
     stat_match = re.search(r"(?<![A-Z])STAT[\s_-]?(\d{4}[A-Z]?)(?![0-9])", upper)
     if stat_match:
         return f"STAT {stat_match.group(1)}"
 
-    # 2. Match standard UNCC course codes like MATH-2167, SPAN-1101, ITSC-1212
     for dept, num in COURSE_PATTERN.findall(upper):
         if dept not in IGNORED_PREFIXES:
             return f"{dept} {num}"
 
-    # 3. Catch standalone course keywords like "STATS EXAM 2"
     if re.search(r"\bSTATS?\b", upper):
         return "STAT 3122"
 
@@ -451,12 +476,34 @@ def clean_canvas_title(raw_summary: str) -> str:
     return cleaned if cleaned else raw_summary.strip()
 
 # ---------- Database & AI Helpers ----------
+def call_gemini_with_fallback(contents, config=None):
+    """Tries primary Gemini model with quick retries, then falls back to backup Flash models on 503/429."""
+    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+    last_err = None
+    for model_name in MODEL_FALLBACKS:
+        for attempt in range(2):
+            try:
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config,
+                )
+            except Exception as e:
+                last_err = e
+                err_str = str(e)
+                if any(code in err_str for code in ["503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED"]):
+                    time.sleep(0.8 * (attempt + 1))
+                    continue
+                if "404" in err_str or "NOT_FOUND" in err_str:
+                    break
+                raise
+    raise last_err
+
 def load_user_df() -> pd.DataFrame:
     res = supabase.table("items").select("*").eq("user_id", user_id).execute()
     if not res.data:
         return pd.DataFrame(columns=["id", "course", "date", "title", "type", "hours", "difficulty", "done"])
 
-    # Sort 'General' items into real courses, normalize labels, and clean Canvas brackets
     needs_reload = False
     for row in res.data:
         curr_course = (row.get("course") or "General").strip() or "General"
@@ -483,10 +530,6 @@ def load_user_df() -> pd.DataFrame:
     return df
 
 def add_rows_dedup(new_rows: list[dict]) -> tuple[int, int]:
-    """Insert new rows and skip duplicates.
-
-    Returns (rows added, existing rows moved out of 'General' into a real course).
-    """
     if not new_rows:
         return 0, 0
     existing = load_user_df()
@@ -507,7 +550,6 @@ def add_rows_dedup(new_rows: list[dict]) -> tuple[int, int]:
         key = (date_str, clean_title.lower())
 
         if key in existing_map:
-            # Already imported. If it was filed under General and we now know the course, fix it.
             row_id, old_course = existing_map[key]
             if row_id is not None and old_course == "General" and course != "General":
                 supabase.table("items").update({"course": course}).eq("id", row_id).execute()
@@ -531,12 +573,28 @@ def add_rows_dedup(new_rows: list[dict]) -> tuple[int, int]:
         supabase.table("items").insert(unique_rows).execute()
     return len(unique_rows), recategorized
 
-def parse_ics_url(ics_url: str) -> list[dict]:
+def clean_course_info(info) -> dict:
+    entry = {}
+    if not isinstance(info, dict):
+        return entry
+    try:
+        total = int(info.get("expected_graded_items") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    if total > 0:
+        entry["expected_total"] = total
+    if info.get("end_date"):
+        end = pd.to_datetime(info["end_date"], errors="coerce")
+        if pd.notna(end):
+            entry["end"] = end.strftime("%Y-%m-%d")
+    return entry
+
+def parse_ics_url(ics_url: str, days_back: int = 120) -> list[dict]:
     resp = requests.get(ics_url.strip(), timeout=15)
     resp.raise_for_status()
     cal = icalendar.Calendar.from_ical(resp.content)
 
-    start_window = datetime.now() - timedelta(days=7)
+    start_window = datetime.now() - timedelta(days=days_back)
     end_window = datetime.now() + timedelta(days=120)
     events = recurring_ical_events.of(cal).between(start_window, end_window)
 
@@ -577,7 +635,6 @@ def parse_ics_url(ics_url: str) -> list[dict]:
     return rows
 
 def parse_quick_natural_language(text: str) -> list[dict]:
-    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
     today_str = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d (%A)")
     prompt = f"""
     Today is {today_str}. Convert this student's natural-language note into a JSON array of 1 or more schedule items.
@@ -592,21 +649,25 @@ def parse_quick_natural_language(text: str) -> list[dict]:
 
     Input: "{text}"
     """
-    res = client.models.generate_content(
-        model=MODEL_ID,
+    res = call_gemini_with_fallback(
         contents=prompt,
         config=types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_budget=0)),
     )
     raw = res.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(raw)
 
-def parse_syllabus_multimodal(uploaded_file=None, pasted_text: str = "", default_course: str = "") -> list[dict]:
-    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+def parse_syllabus_multimodal(uploaded_file=None, pasted_text: str = "", default_course: str = "") -> tuple[list[dict], dict]:
     contents = []
     prompt = f"""
-    Extract all graded assignments, quizzes, labs, projects, and exams with due dates from this syllabus.
-    Return ONLY a valid JSON array of objects with these exact keys:
-    - "course": course code/name (use "{default_course}" if provided, otherwise infer from syllabus, or "General")
+    Read this syllabus and return ONLY one valid JSON object with two keys.
+
+    "course_info": an object with these keys:
+    - "course": course code/name (use "{default_course}" if provided, otherwise infer from the syllabus, or "General")
+    - "expected_graded_items": the total number of graded assignments, quizzes, labs, projects, and exams in the whole course. Add up any counts the syllabus states (for example "10 homework assignments" plus "3 exams"). Use null if the syllabus does not give enough to know. Do not guess.
+    - "end_date": "YYYY-MM-DD" for the last day of class or the final exam, or null if not stated (use 2026 if the year is omitted)
+
+    "items": an array with every graded assignment, quiz, lab, project, and exam that has a due date. Each item has these exact keys:
+    - "course": course code/name (use "{default_course}" if provided, otherwise infer from the syllabus, or "General")
     - "date": "YYYY-MM-DD" (use 2026 if year is omitted)
     - "title": string without commas
     - "type": one of "exam", "assignment", "quiz", "reading"
@@ -636,13 +697,31 @@ def parse_syllabus_multimodal(uploaded_file=None, pasted_text: str = "", default
     if pasted_text.strip():
         contents.append(pasted_text.strip()[:18000])
 
-    response = client.models.generate_content(
-        model=MODEL_ID,
+    response = call_gemini_with_fallback(
         contents=contents,
         config=types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_budget=0)),
     )
     raw = response.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    return json.loads(raw)
+    data = json.loads(raw)
+    if isinstance(data, list):
+        return data, {}
+    return data.get("items") or [], data.get("course_info") or {}
+
+def build_local_fallback_plan(upcoming_items: pd.DataFrame, today: pd.Timestamp) -> str:
+    if upcoming_items.empty:
+        return "You have no unfinished tasks due in the next 14 days—enjoy the breathing room!"
+    lines = ["*Gemini servers are experiencing high demand, so here is an auto-balanced plan built directly from your deadlines:*\n"]
+    sorted_tasks = upcoming_items.sort_values(["date", "difficulty"], ascending=[True, False])
+    for i in range(7):
+        day = today + pd.Timedelta(days=i)
+        day_tasks = sorted_tasks[sorted_tasks["date"].dt.normalize() >= day].head(2)
+        if not day_tasks.empty:
+            bullets = ", ".join(
+                f"**{r['course']}** ({r['title']} — {min(r['hours'], round(daily_capacity / 2, 1))}h)"
+                for _, r in day_tasks.iterrows()
+            )
+            lines.append(f"- **{day.strftime('%a %b %d')}:** Focus on {bullets}")
+    return "\n".join(lines)
 
 def stream_study_plan(df: pd.DataFrame, load_df: pd.DataFrame):
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
@@ -661,17 +740,33 @@ def stream_study_plan(df: pd.DataFrame, load_df: pd.DataFrame):
 
     Write a concise, bulleted 7-day study plan to flatten peak crunch days. Name exact courses, tasks, and realistic hour blocks within {daily_capacity}h/day. Keep it brief and scannable.
     """
-    response = client.models.generate_content_stream(
-        model=MODEL_ID,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-            max_output_tokens=700,
-        ),
+    cfg = types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        max_output_tokens=700,
     )
-    for chunk in response:
-        if chunk.text:
-            yield chunk.text
+
+    for model_name in MODEL_FALLBACKS:
+        try:
+            response = client.models.generate_content_stream(
+                model=model_name,
+                contents=prompt,
+                config=cfg,
+            )
+            yielded_any = False
+            for chunk in response:
+                if chunk.text:
+                    yielded_any = True
+                    yield chunk.text
+            if yielded_any:
+                return
+        except Exception as e:
+            err_str = str(e)
+            if any(code in err_str for code in ["503", "429", "404", "UNAVAILABLE", "NOT_FOUND", "RESOURCE_EXHAUSTED"]):
+                time.sleep(0.6)
+                continue
+            raise
+
+    yield build_local_fallback_plan(upcoming_items, today)
 
 # ---------- Left Taupe Sidebar Navigation & Importers ----------
 with st.sidebar:
@@ -685,7 +780,7 @@ with st.sidebar:
 
     nav_page = st.radio(
         "Navigation",
-        ["Dashboard", "Workload Forecast", "Full Calendar", "Master Task Editor", "Courses", "AI Study Coach"],
+        ["Dashboard", "Workload Forecast", "Full Calendar", "Master Task Editor", "Courses", "Course Progress", "AI Study Coach"],
         label_visibility="collapsed",
     )
 
@@ -693,9 +788,13 @@ with st.sidebar:
 
     with st.expander("Import Calendar (.ics)"):
         ics_link = st.text_input("Paste secret .ics URL", placeholder="https://...")
+        days_back = st.number_input(
+            "Include events from the last (days)", min_value=7, max_value=365, value=120, step=1,
+            help="Go back far enough to reach your first assignment, so course progress counts work you already finished.",
+        )
         if st.button("Sync Calendar") and ics_link:
             try:
-                imported = parse_ics_url(ics_link)
+                imported = parse_ics_url(ics_link, int(days_back))
                 added_count, sorted_count = add_rows_dedup(imported)
                 flash(f"Added {added_count} new events and sorted {sorted_count} existing events into their courses.")
                 st.rerun()
@@ -708,9 +807,21 @@ with st.sidebar:
         syl_text = st.text_area("Or paste syllabus text", height=80)
         if st.button("Extract Deadlines") and (syl_file is not None or syl_text.strip()):
             try:
-                extracted = parse_syllabus_multimodal(syl_file, syl_text, course_tag)
+                extracted, info = parse_syllabus_multimodal(syl_file, syl_text, course_tag)
                 added_count, _ = add_rows_dedup(extracted)
-                flash(f"Added {added_count} new items!")
+                message = f"Added {added_count} new items!"
+                info_course = normalize_course(course_tag) if course_tag.strip() else normalize_course(info.get("course"))
+                entry = clean_course_info(info)
+                if entry and info_course != "General":
+                    merged_info = {**course_info, info_course: {**(course_info.get(info_course) or {}), **entry}}
+                    save_profile_meta({"course_info": merged_info})
+                    found = []
+                    if "expected_total" in entry:
+                        found.append(f"{entry['expected_total']} graded items")
+                    if "end" in entry:
+                        found.append(f"ends {entry['end']}")
+                    message += f" Saved the {info_course} timeline from the syllabus ({', '.join(found)})."
+                flash(message)
                 st.rerun()
             except Exception as e:
                 st.error(f"Extraction failed: {e}")
@@ -812,7 +923,6 @@ all_courses = sorted(df["course"].unique().tolist())
 course_avg = df.groupby("course")["difficulty"].mean().to_dict()
 
 def course_color(course: str) -> str:
-    """Your own color if you picked one, otherwise green -> red from the course's difficulty."""
     pref = course_prefs.get(course) or {}
     auto = difficulty_to_color(pref.get("difficulty", course_avg.get(course, 3)))
     if pref.get("custom"):
@@ -822,6 +932,65 @@ def course_color(course: str) -> str:
 def course_badge(course: str) -> str:
     color = course_color(course)
     return f'<span class="pill-badge" style="background-color:{color}; color:{readable_text(color)};">{esc(course)}</span>'
+
+# ---------- Course Progress (graded work only) ----------
+UNGRADED_TYPES = {"recurring", "job"}
+
+def course_progress(course_df: pd.DataFrame, info: dict):
+    graded = course_df[~course_df["type"].isin(UNGRADED_TYPES)]
+    if graded.empty:
+        return None
+
+    dates = graded["date"].dt.normalize()
+    is_done = graded["done"] == "yes"
+    on_calendar = len(graded)
+
+    try:
+        expected = int(info.get("expected_total") or 0)
+    except (TypeError, ValueError):
+        expected = 0
+    total = max(on_calendar, expected)
+    not_posted = max(expected - on_calendar, 0)
+
+    done = int(is_done.sum())
+    past_due_mask = (dates < today_local) & ~is_done
+    ahead_on_calendar = int(((dates >= today_local) & ~is_done).sum())
+
+    start = dates.min()
+    end = dates.max()
+    end_source = "last item on your calendar"
+    if info.get("end"):
+        parsed_end = pd.to_datetime(info["end"], errors="coerce")
+        if pd.notna(parsed_end) and parsed_end.normalize() >= end:
+            end = parsed_end.normalize()
+            end_source = "course end date"
+    span_days = (end - start).days
+    elapsed = None if span_days <= 0 else round(min(max((today_local - start).days / span_days, 0), 1) * 100)
+
+    total_hours = float(graded["hours"].sum())
+    done_hours = float(graded.loc[is_done, "hours"].sum())
+
+    return {
+        "pct": round(done / total * 100),
+        "done": done,
+        "total": total,
+        "ahead": ahead_on_calendar + not_posted,
+        "past_due": int(past_due_mask.sum()),
+        "not_posted": not_posted,
+        "start": start,
+        "end": end,
+        "end_source": end_source,
+        "elapsed": elapsed,
+        "hours_pct": round(done_hours / total_hours * 100) if total_hours else 0,
+        "past_due_ids": graded.loc[past_due_mask, "id"].astype(int).tolist(),
+        "past_due_df": graded.loc[past_due_mask, ["date", "title", "type", "hours"]].sort_values("date"),
+    }
+
+progress = {}
+for _course in all_courses:
+    _p = course_progress(df[df["course"] == _course], course_info.get(_course) or {})
+    if _p:
+        progress[_course] = _p
 
 # Course Filter Pills
 selected_courses = st.multiselect("Active Courses", options=all_courses, default=all_courses, label_visibility="collapsed")
@@ -864,15 +1033,11 @@ load_df["intensity"] = (load_df["load"] / max_reference_effort * 10).clip(0, 10)
 peak_threshold = min(round(load_df["intensity"].mean() + load_df["intensity"].std(), 1), 9.5)
 load_df["color"] = load_df["intensity"].apply(lambda v: "#D96B78" if v >= 6.5 else ("#E5A93B" if v >= 3.0 else "#5BB396"))
 
-total_items = len(filtered_df)
-done_items = int((filtered_df["done"] == "yes").sum())
+sel_progress = {c: progress[c] for c in selected_courses if c in progress}
+total_items = sum(p["total"] for p in sel_progress.values())
+done_items = sum(p["done"] for p in sel_progress.values())
 overall_pct = round((done_items / total_items) * 100) if total_items else 0
-
-course_stats = []
-for c_name in selected_courses:
-    c_sub = filtered_df[filtered_df["course"] == c_name]
-    c_pct = round(((c_sub["done"] == "yes").sum() / len(c_sub)) * 100) if len(c_sub) else 0
-    course_stats.append((c_name, c_pct))
+course_stats = [(c, p["pct"]) for c, p in sel_progress.items()]
 
 # ---------- Page Views ----------
 if nav_page == "Dashboard":
@@ -961,7 +1126,7 @@ if nav_page == "Dashboard":
         render_html(
             f'<div class="plum-panel">{rings_html}'
             f'<div style="text-align:center; font-size:0.82rem; font-weight:600; color:#F5EFF3; padding-top:4px;">'
-            f'{done_items} of {total_items} tasks done</div></div>'
+            f'{done_items} of {total_items} graded items done</div></div>'
         )
 
 elif nav_page == "Workload Forecast":
@@ -1158,6 +1323,120 @@ elif nav_page == "Courses":
                 st.rerun()
             except Exception as e:
                 st.error(f"Could not rename the course: {e}")
+
+elif nav_page == "Course Progress":
+    st.subheader("Course Progress")
+    st.caption("Progress counts graded work on your calendar: assignments, quizzes, exams, and readings. Class meetings and work shifts are left out.")
+
+    shown = {c: p for c, p in progress.items() if c in selected_courses}
+    if not shown:
+        st.info("No graded work yet. Sync your Canvas calendar or add assignments, quizzes, and exams to see course progress.")
+    else:
+        if "General" in shown:
+            st.info("Items filed under General are not a real course. Sort them into courses on the Courses page.")
+
+        all_done = sum(p["done"] for p in shown.values())
+        all_total = sum(p["total"] for p in shown.values())
+        all_pct = round(all_done / all_total * 100) if all_total else 0
+        st.markdown(f"**All selected courses: {all_pct}%** ({all_done} of {all_total} graded items done)")
+
+        for c, p in shown.items():
+            color = course_color(c)
+            done_w = p["done"] / p["total"] * 100
+            late_w = p["past_due"] / p["total"] * 100
+            elapsed_txt = f'{p["elapsed"]}%' if p["elapsed"] is not None else "n/a"
+            span_note = f'First item {p["start"].strftime("%b %d")} to {p["end"].strftime("%b %d")} ({p["end_source"]})'
+            if p["not_posted"] > 0:
+                span_note += f' · {p["not_posted"]} not on your calendar yet (from the syllabus total)'
+
+            render_html(
+                f'<div class="bento-card">'
+                f'<div style="display:flex; justify-content:space-between; align-items:center;">'
+                f'<span class="course-chip" style="background-color:{color}; color:{readable_text(color)};">{esc(c)}</span>'
+                f'<span style="font-size:1.6rem; font-weight:800; color:#3E313B;">{p["pct"]}%</span></div>'
+                f'<div class="progress-track">'
+                f'<div class="progress-seg" style="width:{done_w:.1f}%; background-color:{color};"></div>'
+                f'<div class="progress-seg" style="width:{late_w:.1f}%; background-color:#C9A7AE;"></div></div>'
+                f'<div class="stat-grid">'
+                f'<div class="stat-box"><div class="stat-num">{p["done"]} of {p["total"]}</div><div class="stat-label">graded items done</div></div>'
+                f'<div class="stat-box"><div class="stat-num">{p["ahead"]}</div><div class="stat-label">still ahead</div></div>'
+                f'<div class="stat-box"><div class="stat-num">{p["past_due"]}</div><div class="stat-label">past due, not checked off</div></div>'
+                f'<div class="stat-box"><div class="stat-num">{elapsed_txt}</div><div class="stat-label">of the course timeline passed</div></div>'
+                f'<div class="stat-box"><div class="stat-num">{p["hours_pct"]}%</div><div class="stat-label">of estimated work hours done</div></div>'
+                f'</div>'
+                f'<div class="pill-sub" style="margin-top:10px;">{esc(span_note)}</div></div>'
+            )
+
+            if p["past_due"]:
+                with st.expander(f'{p["past_due"]} past-due items in {c} are not checked off'):
+                    past_df = p["past_due_df"].copy()
+                    past_df["date"] = past_df["date"].dt.strftime("%b %d")
+                    st.dataframe(past_df, hide_index=True, use_container_width=True)
+                    st.caption("Finished these already? Mark them done and your progress updates.")
+                    if st.button(f"Mark these {p['past_due']} as done", key=f"markdone_{c}"):
+                        try:
+                            supabase.table("items").update({"done": "yes"}).in_("id", p["past_due_ids"]).execute()
+                            flash(f"Marked {p['past_due']} items in {c} as done.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Could not update those items: {e}")
+
+        st.divider()
+        st.markdown("#### Course totals from the syllabus")
+        st.caption(
+            "Your calendar only lists work that has been posted so far. Enter how many graded items the whole course has "
+            "and the last day of class, and progress will count what is still to come. "
+            "The AI Syllabus Extractor fills these in when your syllabus states them."
+        )
+        with st.form("course_totals_form"):
+            f1, f2, f3 = st.columns([2, 3, 2])
+            f1.caption("Course")
+            f2.caption("Graded items in the whole course (0 = unknown)")
+            f3.caption("Last day of class")
+
+            totals_input = {}
+            for c in progress:
+                info = course_info.get(c) or {}
+                existing_end = None
+                if info.get("end"):
+                    parsed_end = pd.to_datetime(info["end"], errors="coerce")
+                    if pd.notna(parsed_end):
+                        existing_end = parsed_end.date()
+
+                g1, g2, g3 = st.columns([2, 3, 2])
+                with g1:
+                    render_html(
+                        f'<span class="course-chip" style="background-color:{course_color(c)}; color:{readable_text(course_color(c))};">{esc(c)}</span>'
+                    )
+                total_val = g2.number_input(
+                    f"Graded items in {c}", min_value=0, max_value=500, value=int(info.get("expected_total") or 0),
+                    step=1, key=f"tot_{c}", label_visibility="collapsed",
+                )
+                end_val = g3.date_input(
+                    f"Last day of class for {c}", value=existing_end, key=f"end_{c}", label_visibility="collapsed",
+                )
+                totals_input[c] = (int(total_val), end_val)
+
+            totals_saved = st.form_submit_button("Save course totals", type="primary")
+
+        if totals_saved:
+            try:
+                new_info = dict(course_info)
+                for c, (total_val, end_val) in totals_input.items():
+                    entry = {}
+                    if total_val > 0:
+                        entry["expected_total"] = total_val
+                    if end_val:
+                        entry["end"] = end_val.strftime("%Y-%m-%d")
+                    if entry:
+                        new_info[c] = entry
+                    else:
+                        new_info.pop(c, None)
+                save_profile_meta({"course_info": new_info})
+                flash("Course totals saved.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not save course totals: {e}")
 
 elif nav_page == "AI Study Coach":
     st.subheader("AI Crunch-Week Study Plan Generator")
