@@ -227,40 +227,54 @@ for _, row in df.iterrows():
 
 load_df = pd.DataFrame(daily_records).groupby("date", as_index=False)["load"].sum()
 full_range = pd.date_range(load_df["date"].min(), load_df["date"].max(), freq="D")
-load_df = load_df.set_index("date").reindex(full_range, fill_value=0.0).rename_axis("date").reset_index()
+load_df = load_df.set_index(mean"date").reindex(full_range, fill_value=0.0).rename_axis("date").reset_index()
 
-mean_load = load_df["load"].mean()
-std_load = load_df["load"].std()
-peak_threshold = mean_load + std_load
+# Normalize daily load onto a clean 0–10 scale (10 = heavy crunch day, e.g., ~15+ weighted effort hours)
+MAX_REFERENCE_EFFORT = 15.0
+load_df["intensity"] = (load_df["load"] / MAX_REFERENCE_EFFORT * 10).clip(0, 10).round(1)
 
-q33, q66 = np.percentile(load_df["load"], [33, 66])
+mean_intensity = load_df["intensity"].mean()
+std_intensity = load_df["intensity"].std()
+peak_threshold = min(round(mean_intensity + std_intensity, 1), 9.5)
+
 def load_color(val):
-    if val >= q66 and val > 0:
-        return "#ef4444"  # Red (high load)
-    elif val >= q33 and val > 0:
-        return "#eab308"  # Yellow (medium load)
-    return "#22c55e"      # Green (light load)
+    if val >= 6.5:
+        return "#ef4444"  # Red (Heavy / Peak)
+    elif val >= 3.0:
+        return "#eab308"  # Yellow (Moderate)
+    return "#22c55e"      # Green (Light / Free)
 
-load_df["color"] = load_df["load"].apply(load_color)
+load_df["color"] = load_df["intensity"].apply(load_color)
 
-# ---------- Workload Line Graph with Zoom ----------
+# ---------- Workload Line Graph with Zoom & Scale Guide ----------
 st.subheader("Semester Workload Forecast")
+
+with st.expander("How to read your Workload Intensity Score (0–10)", expanded=False):
+    st.markdown("""
+    * **0 – 2.9 (🟢 Light / Free):** Nothing due or light routine tasks; great time to get ahead or rest.
+    * **3.0 – 6.4 (🟡 Moderate):** Steady classes, readings, or early assignment prep.
+    * **6.5 – 10.0 (🔴 Heavy / Crunch):** High volume of hours and/or high-difficulty exams and deadlines stacked together.
+    """)
+
 fig = go.Figure()
 
 fig.add_trace(go.Scatter(
     x=load_df["date"],
-    y=load_df["load"],
+    y=load_df["intensity"],
     mode="lines+markers",
-    name="Daily Load",
-    line=dict(color="#6366f1", width=2.5),
-    marker=dict(color=load_df["color"], size=8),
+    name="Workload Intensity",
+    line=dict(color="#6366f1", width=3, shape="spline", smoothing=0.4),
+    fill="tozeroy",
+    fillcolor="rgba(99, 102, 241, 0.10)",
+    marker=dict(color=load_df["color"], size=8, line=dict(width=1, color="white")),
+    hovertemplate="<b>%{x|%b %d, %Y}</b><br>Workload Intensity: <b>%{y}/10</b><extra></extra>",
 ))
 
 fig.add_hline(
     y=peak_threshold,
     line_dash="dash",
     line_color="#ef4444",
-    annotation_text="Peak Threshold (+1 SD)",
+    annotation_text=f"Your Peak Threshold ({peak_threshold}/10)",
     annotation_position="top left",
 )
 
@@ -276,9 +290,16 @@ fig.update_layout(
         rangeslider=dict(visible=True),
         type="date",
     ),
-    yaxis_title="Weighted Effort Score",
-    height=380,
+    yaxis=dict(
+        title="Workload Intensity (0–10)",
+        range=[-0.4, 10.6],
+        tickmode="array",
+        tickvals=[0, 2.5, 5, 7.5, 10],
+        ticktext=["0 (Free)", "2.5", "5 (Moderate)", "7.5", "10 (Max Load)"],
+    ),
+    height=400,
     margin=dict(l=20, r=20, t=30, b=20),
+    hovermode="x unified",
 )
 st.plotly_chart(fig, use_container_width=True)
 
