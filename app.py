@@ -11,14 +11,21 @@ from google import genai
 from supabase import create_client
 import streamlit as st
 
-st.set_page_config(page_title="Semester Planner", layout="wide")
-
 # Initialize Supabase client
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 # ---------- Authentication Gate ----------
 if "user" not in st.session_state:
     st.session_state["user"] = None
+if "session" not in st.session_state:
+    st.session_state["session"] = None
+
+# Re-attach auth token on every Streamlit rerun so RLS knows who is logged in
+if st.session_state["session"] is not None:
+    supabase.auth.set_session(
+        st.session_state["session"].access_token,
+        st.session_state["session"].refresh_token,
+    )
 
 if st.session_state["user"] is None:
     st.title("Semester Planner")
@@ -34,6 +41,7 @@ if st.session_state["user"] is None:
                 try:
                     res = supabase.auth.sign_in_with_password({"email": email, "password": password})
                     st.session_state["user"] = res.user
+                    st.session_state["session"] = res.session
                     st.rerun()
                 except Exception as e:
                     st.error(f"Login failed: {e}")
@@ -47,10 +55,13 @@ if st.session_state["user"] is None:
                     res = supabase.auth.sign_up({"email": new_email, "password": new_password})
                     if res.user:
                         st.session_state["user"] = res.user
+                        st.session_state["session"] = res.session
                         st.success("Account created!")
                         st.rerun()
                 except Exception as e:
                     st.error(f"Sign up failed: {e}")
+
+    st.stop()
 
     st.stop()
 
