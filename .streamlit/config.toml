@@ -1,0 +1,8 @@
+# Theme from the Semester Planner design system (tokens.css).
+# Ink is the accent, because green to coral is reserved for busyness.
+[theme]
+primaryColor = "#15171C"
+backgroundColor = "#F7F6F3"
+secondaryBackgroundColor = "#F0EEEA"
+textColor = "#15171C"
+font = "sans serif"
