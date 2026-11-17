@@ -565,7 +565,7 @@ with st.sidebar:
             updated = 0
             for item in existing_gen:
                 detected = detect_course_code(item["title"])
-                 if detected != "General":
+                if detected != "General":
                     supabase.table("items").update({
                         "course": detected,
                         "title": clean_canvas_title(item["title"]),
