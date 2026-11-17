@@ -1,3 +1,4 @@
+import calendar as pycal
 import json
 import re
 from datetime import datetime, timedelta
@@ -13,18 +14,203 @@ from pypdf import PdfReader
 from docx import Document
 from PIL import Image
 from google import genai
+from google.genai import types
 from supabase import create_client
 from streamlit_calendar import calendar
 import streamlit as st
-from google import genai
-from google.genai import types
 
-st.set_page_config(page_title="Semester Planner", layout="wide")
+st.set_page_config(page_title="Semester Planner", layout="wide", initial_sidebar_state="expanded")
 
 MODEL_ID = "gemini-3.8-flash"
 
 # Initialize Supabase client
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+
+# ---------- Custom Bento Aesthetic CSS ----------
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Plus Jakarta Sans', sans-serif;
+}
+
+/* Warm Cream Main Background */
+.stApp {
+    background-color: #F7F3EE;
+    color: #3E313B;
+}
+
+/* Soft Taupe Sidebar */
+section[data-testid="stSidebar"] {
+    background-color: #E6E0DE;
+    border-right: 1px solid #D8CFD1;
+}
+
+/* Rounded Pill Inputs & Buttons */
+div[data-testid="stTextInput"] input {
+    border-radius: 999px !important;
+    background-color: #EDE7E5 !important;
+    border: 1px solid #D5CBCD !important;
+    padding-left: 18px !important;
+    color: #3E313B !important;
+}
+
+button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitButton"] button {
+    border-radius: 999px !important;
+    font-weight: 600 !important;
+}
+
+/* Bento Cards */
+.bento-card {
+    background-color: #EBE4E6;
+    border-radius: 22px;
+    padding: 18px 20px;
+    margin-bottom: 16px;
+    box-shadow: 0 2px 10px rgba(62, 49, 59, 0.04);
+}
+.bento-title {
+    font-size: 1.02rem;
+    font-weight: 700;
+    color: #4A3B47;
+    margin-bottom: 12px;
+}
+
+/* Inner Pill Row inside Bento Cards */
+.pill-row {
+    background-color: #F7F3EE;
+    border-radius: 999px;
+    padding: 9px 16px;
+    margin-bottom: 9px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 0.88rem;
+    color: #3E313B;
+}
+.pill-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    overflow: hidden;
+}
+.pill-badge {
+    background-color: #EBE4E6;
+    color: #5C4958;
+    font-weight: 700;
+    font-size: 0.75rem;
+    padding: 4px 10px;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+.pill-title {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.pill-sub {
+    font-size: 0.76rem;
+    color: #7D6B78;
+    white-space: nowrap;
+}
+
+/* Date Circle Badge (like My Schedule in reference) */
+.date-circle {
+    min-width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background-color: #FFFFFF;
+    color: #4A3B47;
+    font-weight: 700;
+    font-size: 0.85rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+
+/* Right Plum Progress Rail */
+.plum-panel {
+    background-color: #8D7588;
+    border-radius: 26px;
+    padding: 16px 14px;
+    color: #FFFFFF;
+}
+.plum-subcard {
+    background-color: #7B6376;
+    border-radius: 20px;
+    padding: 14px 10px;
+    margin-bottom: 14px;
+    text-align: center;
+}
+.plum-label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #F5EFF3;
+    margin-bottom: 8px;
+}
+
+/* Sidebar User Avatar Header */
+.profile-box {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 4px 14px 4px;
+}
+.avatar-circle {
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #8D7588, #5A4556);
+    color: #FFFFFF;
+    font-weight: 700;
+    font-size: 1.15rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Mini Calendar Table */
+.mini-cal {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: center;
+    font-size: 0.78rem;
+    color: #5A4A56;
+    background: #F7F3EE;
+    border-radius: 16px;
+    overflow: hidden;
+}
+.mini-cal th {
+    padding: 6px 2px;
+    font-weight: 700;
+    color: #8D7588;
+}
+.mini-cal td {
+    padding: 5px 2px;
+}
+.cal-today {
+    background-color: #8D7588;
+    color: #FFFFFF !important;
+    border-radius: 50%;
+    font-weight: 700;
+    display: inline-block;
+    width: 22px;
+    height: 22px;
+    line-height: 22px;
+}
+.cal-due {
+    border: 1.5px solid #D9777F;
+    border-radius: 50%;
+    font-weight: 700;
+    display: inline-block;
+    width: 22px;
+    height: 22px;
+    line-height: 20px;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ---------- Authentication Gate ----------
 if "user" not in st.session_state:
@@ -59,7 +245,7 @@ if st.session_state["user"] is None:
 
     with tab_signup:
         with st.form("signup_form"):
-            full_name = st.text_input("Your First Name (e.g., Maya)")
+            full_name = st.text_input("Your First Name (e.g., Kaya)")
             new_email = st.text_input("Email")
             new_password = st.text_input("Password (min 6 characters)", type="password")
             if st.form_submit_button("Create Account"):
@@ -78,13 +264,13 @@ if st.session_state["user"] is None:
 
     st.stop()
 
-# ---------- User Profile, Preferences & Time-of-Day Greeting ----------
+# ---------- User Profile & Preferences ----------
 user = st.session_state["user"]
 user_id = user.id
 meta = user.user_metadata or {}
 display_name = meta.get("full_name") or user.email.split("@")[0].capitalize()
+initials = "".join(part[0].upper() for part in display_name.split()[:2]) or "S"
 
-# Load saved user calibration settings (stored cleanly in Supabase user_metadata)
 daily_capacity = float(meta.get("daily_capacity", 6.0))
 exam_spread = int(meta.get("exam_spread", 7))
 assign_spread = int(meta.get("assign_spread", 4))
@@ -100,7 +286,48 @@ def get_greeting(name: str) -> str:
         period = "Good Evening"
     return f"{period}, {name}"
 
-# ---------- Database & AI Parsing Helpers ----------
+def render_progress_ring(label: str, pct: int, stroke_color: str) -> str:
+    pct = max(0, min(100, int(pct)))
+    radius = 34
+    circumference = 2 * 3.14159 * radius
+    offset = circumference * (1 - pct / 100.0)
+    return f"""
+    <div class="plum-subcard">
+        <div class="plum-label">{label}</div>
+        <svg width="88" height="88" viewBox="0 0 88 88">
+            <circle cx="44" cy="44" r="{radius}" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="7" />
+            <circle cx="44" cy="44" r="{radius}" fill="none" stroke="{stroke_color}" stroke-width="7"
+                    stroke-dasharray="{circumference:.1f}" stroke-dashoffset="{offset:.1f}"
+                    stroke-linecap="round" transform="rotate(-90 44 44)" />
+            <text x="44" y="49" text-anchor="middle" fill="#FFFFFF" font-size="16" font-weight="700">{pct}%</text>
+        </svg>
+    </div>
+    """
+
+def render_mini_calendar(year: int, month: int, today_day: int, due_days: set[int]) -> str:
+    cal_matrix = pycal.monthcalendar(year, month)
+    month_name = datetime(year, month, 1).strftime("%B %Y")
+    html = f"""
+    <div style="text-align:center; font-weight:700; font-size:0.85rem; color:#4A3B47; margin-bottom:6px;">{month_name}</div>
+    <table class="mini-cal">
+        <tr><th>Mo</th><th>Tu</th><th>We</th><th>Th</th><th>Fr</th><th>Sa</th><th>Su</th></tr>
+    """
+    for week in cal_matrix:
+        html += "<tr>"
+        for d in week:
+            if d == 0:
+                html += "<td></td>"
+            elif d == today_day:
+                html += f'<td><span class="cal-today">{d}</span></td>'
+            elif d in due_days:
+                html += f'<td><span class="cal-due">{d}</span></td>'
+            else:
+                html += f"<td>{d}</td>"
+        html += "</tr>"
+    html += "</table>"
+    return html
+
+# ---------- Database & AI Helpers ----------
 def load_user_df() -> pd.DataFrame:
     res = supabase.table("items").select("*").eq("user_id", user_id).execute()
     if not res.data:
@@ -202,14 +429,17 @@ def parse_quick_natural_language(text: str) -> list[dict]:
 
     Input: "{text}"
     """
-    res = client.models.generate_content(model=MODEL_ID, contents=prompt)
+    res = client.models.generate_content(
+        model=MODEL_ID,
+        contents=prompt,
+        config=types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_budget=0)),
+    )
     raw = res.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(raw)
 
 def parse_syllabus_multimodal(uploaded_file=None, pasted_text: str = "", default_course: str = "") -> list[dict]:
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
     contents = []
-
     prompt = f"""
     Extract all graded assignments, quizzes, labs, projects, and exams with due dates from this syllabus.
     Return ONLY a valid JSON array of objects with these exact keys:
@@ -243,7 +473,11 @@ def parse_syllabus_multimodal(uploaded_file=None, pasted_text: str = "", default
     if pasted_text.strip():
         contents.append(pasted_text.strip()[:18000])
 
-    response = client.models.generate_content(model=MODEL_ID, contents=contents)
+    response = client.models.generate_content(
+        model=MODEL_ID,
+        contents=contents,
+        config=types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_budget=0)),
+    )
     raw = response.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(raw)
 
@@ -276,53 +510,44 @@ def stream_study_plan(df: pd.DataFrame, load_df: pd.DataFrame):
         if chunk.text:
             yield chunk.text
 
-# ---------- Sidebar Controls ----------
+# ---------- Left Taupe Sidebar Navigation & Importers ----------
 with st.sidebar:
-    st.caption(f"Signed in as **{display_name}** ({user.email})")
+    st.markdown(f"""
+    <div style="font-size:1.35rem; font-weight:800; color:#4A3B47; letter-spacing:-0.5px; margin-bottom:4px;">
+        Plan<span style="color:#8D7588;">tech</span>
+    </div>
+    <div class="profile-box">
+        <div class="avatar-circle">{initials}</div>
+        <div>
+            <div style="font-weight:700; color:#3E313B; font-size:0.95rem;">{display_name}</div>
+            <div style="font-size:0.75rem; color:#7D6B78;">{user.email}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    with st.expander("Profile & Capacity Calibration"):
-        updated_name = st.text_input("Display Name", value=display_name)
-        new_cap = st.slider("Max Daily Study Capacity (hrs)", 2.0, 14.0, daily_capacity, 0.5,
-                            help="Lower this if you work a part-time job or have heavy extracurriculars.")
-        new_exam_sp = st.slider("Exam Prep Spread (days before due)", 2, 14, exam_spread)
-        new_assign_sp = st.slider("Assignment Prep Spread (days before due)", 1, 10, assign_spread)
-        if st.button("Save Preferences"):
-            res = supabase.auth.update_user({
-                "data": {
-                    "full_name": updated_name.strip() or display_name,
-                    "daily_capacity": new_cap,
-                    "exam_spread": new_exam_sp,
-                    "assign_spread": new_assign_sp,
-                }
-            })
-            st.session_state["user"] = res.user
-            st.success("Preferences saved!")
-            st.rerun()
-
-    if st.button("Log Out"):
-        supabase.auth.sign_out()
-        st.session_state["user"] = None
-        st.session_state["session"] = None
-        st.rerun()
+    nav_page = st.radio(
+        "Navigation",
+        ["Dashboard", "Workload Forecast", "Full Calendar", "Master Task Editor", "AI Study Coach"],
+        label_visibility="collapsed",
+    )
 
     st.divider()
-    st.header("1. Import Schedule")
 
-    with st.expander("Sync Google Calendar / Canvas (.ics)"):
+    with st.expander("Import Calendar (.ics)"):
         ics_link = st.text_input("Paste secret .ics URL", placeholder="https://...")
-        if st.button("Sync Calendar (Auto-Deduplicates)") and ics_link:
+        if st.button("Sync Calendar") and ics_link:
             try:
                 imported = parse_ics_url(ics_link)
                 added_count = add_rows_dedup(imported)
-                st.success(f"Added {added_count} new events ({len(imported) - added_count} duplicates skipped).")
+                st.success(f"Added {added_count} new events!")
                 st.rerun()
             except Exception as e:
-                st.error(f"Calendar sync failed: {e}")
+                st.error(f"Sync failed: {e}")
 
-    with st.expander("AI Syllabus / Schedule Extractor"):
+    with st.expander("AI Syllabus Extractor"):
         course_tag = st.text_input("Course Tag (optional)", placeholder="e.g., ITSC 3155")
-        syl_file = st.file_uploader("Upload PDF, Word (.docx), or Schedule Screenshot", type=["pdf", "docx", "png", "jpg", "jpeg"])
-        syl_text = st.text_area("Or paste syllabus / Canvas schedule text", height=90)
+        syl_file = st.file_uploader("PDF, Word (.docx), or Image", type=["pdf", "docx", "png", "jpg", "jpeg"])
+        syl_text = st.text_area("Or paste syllabus text", height=80)
         if st.button("Extract Deadlines") and (syl_file is not None or syl_text.strip()):
             try:
                 extracted = parse_syllabus_multimodal(syl_file, syl_text, course_tag)
@@ -332,87 +557,106 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Extraction failed: {e}")
 
+    with st.expander("Add Item Manually"):
+        with st.form("add_item_form", clear_on_submit=True):
+            m_course = st.text_input("Course", value="General")
+            m_title = st.text_input("Title")
+            m_date = st.date_input("Date")
+            m_type = st.selectbox("Type", ["assignment", "exam", "quiz", "reading", "recurring", "job"])
+            m_hours = st.number_input("Hours", min_value=0.25, max_value=40.0, value=1.5, step=0.25)
+            m_diff = st.slider("Difficulty", 1, 5, 3)
+            if st.form_submit_button("Add Item") and m_title.strip():
+                add_rows_dedup([{
+                    "course": m_course.strip() or "General",
+                    "date": m_date.strftime("%Y-%m-%d"),
+                    "title": m_title.strip(),
+                    "type": m_type,
+                    "hours": m_hours,
+                    "difficulty": m_diff,
+                    "done": "no",
+                }])
+                st.rerun()
+
+    with st.expander("Settings & Calibration"):
+        updated_name = st.text_input("Display Name", value=display_name)
+        new_cap = st.slider("Daily Study Capacity (hrs)", 2.0, 14.0, daily_capacity, 0.5)
+        new_exam_sp = st.slider("Exam Prep Spread (days)", 2, 14, exam_spread)
+        new_assign_sp = st.slider("Assignment Spread (days)", 1, 10, assign_spread)
+        if st.button("Save Settings"):
+            res = supabase.auth.update_user({
+                "data": {
+                    "full_name": updated_name.strip() or display_name,
+                    "daily_capacity": new_cap,
+                    "exam_spread": new_exam_sp,
+                    "assign_spread": new_assign_sp,
+                }
+            })
+            st.session_state["user"] = res.user
+            st.rerun()
+
     st.divider()
-    st.header("2. Add Item Manually")
-    with st.form("add_item_form", clear_on_submit=True):
-        m_course = st.text_input("Course", value="General")
-        m_title = st.text_input("Title")
-        m_date = st.date_input("Date")
-        m_type = st.selectbox("Type", ["assignment", "exam", "quiz", "reading", "recurring", "job"])
-        m_hours = st.number_input("Estimated hours", min_value=0.25, max_value=40.0, value=1.5, step=0.25)
-        m_diff = st.slider("Difficulty (1 easy, 5 hard)", 1, 5, 3)
-        if st.form_submit_button("Add") and m_title.strip():
-            add_rows_dedup([{
-                "course": m_course.strip() or "General",
-                "date": m_date.strftime("%Y-%m-%d"),
-                "title": m_title.strip(),
-                "type": m_type,
-                "hours": m_hours,
-                "difficulty": m_diff,
-                "done": "no",
-            }])
-            st.rerun()
+    if st.button("Log Out", use_container_width=True):
+        supabase.auth.sign_out()
+        st.session_state["user"] = None
+        st.session_state["session"] = None
+        st.rerun()
 
-# ---------- Main Header, Today Summary & Quick-Add Bar ----------
+# ---------- Load Data & Top Header Row ----------
 df = load_user_df()
-today_local = pd.Timestamp(datetime.now(ZoneInfo("America/New_York")).date())
+now_ny = datetime.now(ZoneInfo("America/New_York"))
+today_local = pd.Timestamp(now_ny.date())
 
-st.title(get_greeting(display_name))
-
-# 1-2 sentence dynamic summary of what's due today
-if not df.empty:
-    due_today = df[(df["done"] == "no") & (df["date"].dt.normalize() == today_local)]
-    if due_today.empty:
-        next_up = df[(df["done"] == "no") & (df["date"].dt.normalize() > today_local)].sort_values("date")
-        if next_up.empty:
-            st.markdown("##### You have nothing due today and no upcoming deadlines on your schedule.")
+top_left, top_right = st.columns([2.2, 1.5])
+with top_left:
+    st.markdown(f"<h1 style='margin-bottom:0; color:#3E313B; font-weight:800;'>{get_greeting(display_name)}</h1>", unsafe_allow_html=True)
+    if not df.empty:
+        due_today = df[(df["done"] == "no") & (df["date"].dt.normalize() == today_local)]
+        if due_today.empty:
+            next_up = df[(df["done"] == "no") & (df["date"].dt.normalize() > today_local)].sort_values("date")
+            if next_up.empty:
+                st.caption("You have nothing due today and no upcoming deadlines.")
+            else:
+                nxt = next_up.iloc[0]
+                st.caption(f"Nothing due today. Next up: **{nxt['title']}** ({nxt['course']}) on {nxt['date'].strftime('%b %d')}.")
+        elif len(due_today) == 1:
+            item = due_today.iloc[0]
+            st.caption(f"You have **{item['title']}** ({item['course']}) due today ({item['hours']}h).")
         else:
-            nxt = next_up.iloc[0]
-            st.markdown(f"##### You have nothing due today. Next up: **{nxt['title']}** ({nxt['course']}) on {nxt['date'].strftime('%b %d')}.")
-    elif len(due_today) == 1:
-        item = due_today.iloc[0]
-        st.markdown(f"##### You have **{item['title']}** ({item['course']}) due today ({item['hours']}h estimated).")
-    else:
-        prioritized = due_today.sort_values(["difficulty", "hours"], ascending=False)
-        top_item = prioritized.iloc[0]["title"]
-        others = len(due_today) - 1
-        noun = "item" if others == 1 else "items"
-        st.markdown(f"##### You have **{top_item}** and {others} other {noun} due today.")
+            top_item = due_today.sort_values(["difficulty", "hours"], ascending=False).iloc[0]["title"]
+            others = len(due_today) - 1
+            st.caption(f"You have **{top_item}** and {others} other {'item' if others == 1 else 'items'} due today.")
 
-st.caption("**AI Quick-Add:** Type any assignment, exam, or shift in plain English below to automatically schedule it.")
-with st.form("quick_nl_form", clear_on_submit=True):
-    q_col1, q_col2 = st.columns([4, 1.3])
-    nl_prompt = q_col1.text_input(
-        "Quick Add (AI)",
-        placeholder="e.g., 'ITSC 3155 Midterm next Thursday takes 6 hours diff 5'",
-        label_visibility="collapsed",
-    )
-    if q_col2.form_submit_button("✨ Quick Add", use_container_width=True) and nl_prompt.strip():
-        try:
-            parsed_items = parse_quick_natural_language(nl_prompt.strip())
-            added = add_rows_dedup(parsed_items)
-            st.success(f"Added {added} item(s)!")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Could not parse quick add: {e}")
+with top_right:
+    with st.form("quick_nl_form", clear_on_submit=True):
+        q1, q2 = st.columns([3.5, 1.3])
+        nl_prompt = q1.text_input(
+            "AI Quick-Add",
+            placeholder="✨ Quick-Add: 'CS 3155 Quiz Friday 2h'",
+            label_visibility="collapsed",
+        )
+        if q2.form_submit_button("Add", use_container_width=True) and nl_prompt.strip():
+            try:
+                parsed = parse_quick_natural_language(nl_prompt.strip())
+                add_rows_dedup(parsed)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+    st.caption("AI Quick-Add: creates tasks from plain English")
 
 if df.empty:
-    st.info("Your schedule is empty! Use the Quick-Add bar above or the sidebar to sync Canvas/Google Calendar or upload a syllabus.")
-    st.stop()
-if df.empty:
-    st.info("Your schedule is empty! Use the Quick Add bar above or the sidebar to sync Canvas/Google Calendar or upload a syllabus.")
+    st.info("Your schedule is empty! Use the AI Quick-Add bar above or the left sidebar to import Canvas/Google Calendar or upload a syllabus.")
     st.stop()
 
-# Course Filter Bar
+# Course Filter Pills
 all_courses = sorted(df["course"].unique().tolist())
-selected_courses = st.multiselect("Filter by Course", options=all_courses, default=all_courses)
+selected_courses = st.multiselect("Active Courses", options=all_courses, default=all_courses, label_visibility="collapsed")
 filtered_df = df[df["course"].isin(selected_courses)].copy()
 
 if filtered_df.empty:
-    st.warning("No items match your selected course filters.")
+    st.warning("Select at least one course above.")
     st.stop()
 
-# ---------- Compute Calibrated Time-Spread Workload & 0-10 Intensity ----------
+# ---------- Compute Workload & Completion Metrics ----------
 filtered_df["effort"] = filtered_df["hours"] * (0.5 + filtered_df["difficulty"] * 0.25)
 SPREAD_DAYS = {"exam": exam_spread, "assignment": assign_spread}
 daily_records = []
@@ -434,159 +678,184 @@ load_df = raw_daily.groupby("date", as_index=False)["load"].sum()
 full_range = pd.date_range(load_df["date"].min(), load_df["date"].max(), freq="D")
 load_df = load_df.set_index("date").reindex(full_range, fill_value=0.0).rename_axis("date").reset_index()
 
-# Scale 0-10 dynamically against the user's personal daily study capacity
 max_reference_effort = daily_capacity * 1.5
 load_df["intensity"] = (load_df["load"] / max_reference_effort * 10).clip(0, 10).round(1)
 peak_threshold = min(round(load_df["intensity"].mean() + load_df["intensity"].std(), 1), 9.5)
+load_df["color"] = load_df["intensity"].apply(lambda v: "#D96B78" if v >= 6.5 else ("#E5A93B" if v >= 3.0 else "#5BB396"))
 
-def load_color(val):
-    if val >= 6.5:
-        return "#ef4444"
-    elif val >= 3.0:
-        return "#eab308"
-    return "#22c55e"
+# Calculate Course Completion Percentages for the Right Plum Progress Rail
+total_items = len(filtered_df)
+done_items = int((filtered_df["done"] == "yes").sum())
+overall_pct = round((done_items / total_items) * 100) if total_items else 0
 
-load_df["color"] = load_df["intensity"].apply(load_color)
+course_stats = []
+for c_name in selected_courses:
+    c_sub = filtered_df[filtered_df["course"] == c_name]
+    c_pct = round(((c_sub["done"] == "yes").sum() / len(c_sub)) * 100) if len(c_sub) else 0
+    course_stats.append((c_name, c_pct))
 
-# ---------- Navigation Tabs ----------
-tab_overview, tab_cal, tab_table, tab_coach = st.tabs([
-    "📊 Workload Overview",
-    "📅 Calendar Grid",
-    "📝 Master Task Editor",
-    "🧠 AI Study Coach",
-])
+# ---------- Page Views ----------
+if nav_page == "Dashboard":
+    main_area, right_rail = st.columns([3.3, 1.0])
 
-with tab_overview:
-    col_hdr, col_toggle = st.columns([3, 1])
-    with col_hdr:
-        st.subheader("Semester Workload Forecast")
-    with col_toggle:
-        chart_mode = st.radio("Chart View", ["Total Intensity Line", "Stacked by Course"], horizontal=True)
+    with main_area:
+        # Row 1: Two Bento Cards (Needs Attention + Upcoming Deadlines)
+        b1, b2 = st.columns(2)
 
-    with st.expander(f"How to read your Workload Intensity Score (Calibrated to {daily_capacity}h/day capacity)", expanded=False):
-        st.markdown("""
-        * **0 – 2.9 (🟢 Light / Free):** Nothing due or light routine tasks; great time to get ahead or rest.
-        * **3.0 – 6.4 (🟡 Moderate):** Steady classes, readings, or early assignment prep.
-        * **6.5 – 10.0 (🔴 Heavy / Crunch):** High volume of hours and/or high-difficulty exams and deadlines stacked together.
-        """)
+        with b1:
+            urgent = filtered_df[
+                (filtered_df["done"] == "no") & (filtered_df["date"] >= today_local)
+            ].sort_values(["difficulty", "date"], ascending=[False, True]).head(3)
 
-    if chart_mode == "Total Intensity Line":
+            rows_html = ""
+            if urgent.empty:
+                rows_html = '<div class="pill-row"><span class="pill-sub">All caught up on urgent tasks!</span></div>'
+            else:
+                for _, r in urgent.iterrows():
+                    rows_html += f"""
+                    <div class="pill-row">
+                        <div class="pill-left">
+                            <span class="pill-badge">{r['course']}</span>
+                            <span class="pill-title">{r['title']}</span>
+                        </div>
+                        <span class="pill-sub">Diff {r['difficulty']}/5</span>
+                    </div>
+                    """
+            st.markdown(f'<div class="bento-card"><div class="bento-title">Priority Focus</div>{rows_html}</div>', unsafe_allow_html=True)
+
+        with b2:
+            upcoming = filtered_df[
+                (filtered_df["done"] == "no") & (filtered_df["date"] >= today_local)
+            ].sort_values("date").head(3)
+
+            up_html = ""
+            if upcoming.empty:
+                up_html = '<div class="pill-row"><span class="pill-sub">No upcoming deadlines scheduled.</span></div>'
+            else:
+                for _, r in upcoming.iterrows():
+                    up_html += f"""
+                    <div class="pill-row">
+                        <div class="pill-left">
+                            <span class="pill-badge">{r['date'].strftime('%b %d')}</span>
+                            <span class="pill-title">{r['title']}</span>
+                        </div>
+                        <span class="pill-sub">{r['hours']}h</span>
+                    </div>
+                    """
+            st.markdown(f'<div class="bento-card"><div class="bento-title">Upcoming Events</div>{up_html}</div>', unsafe_allow_html=True)
+
+        # Row 2: My Schedule Bento Card (Mini Calendar Grid + Numbered Day Pills, matching reference)
+        month_due = filtered_df[
+            (filtered_df["date"].dt.year == now_ny.year) & (filtered_df["date"].dt.month == now_ny.month)
+        ]
+        due_day_nums = set(month_due["date"].dt.day.tolist())
+        cal_html = render_mini_calendar(now_ny.year, now_ny.month, now_ny.day, due_day_nums)
+
+        next_three = filtered_df[filtered_df["date"] >= today_local].sort_values("date").head(3)
+        sched_pills = ""
+        if next_three.empty:
+            sched_pills = '<div class="pill-row"><span class="pill-sub">No events left this week.</span></div>'
+        else:
+            for _, r in next_three.iterrows():
+                sched_pills += f"""
+                <div class="pill-row">
+                    <div class="pill-left">
+                        <div class="date-circle">{r['date'].day}</div>
+                        <div>
+                            <div class="pill-title">{r['title']}</div>
+                            <div class="pill-sub">{r['course']} • {r['type'].capitalize()}</div>
+                        </div>
+                    </div>
+                    <span class="pill-sub">{r['hours']}h</span>
+                </div>
+                """
+
+        st.markdown(f"""
+        <div class="bento-card">
+            <div class="bento-title">My Schedule</div>
+            <div style="display:grid; grid-template-columns: 1.05fr 1.35fr; gap:16px; align-items:center;">
+                <div>{cal_html}</div>
+                <div>{sched_pills}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Row 3: Compact Workload Intensity Curve Bento Card
+        st.markdown('<div class="bento-card"><div class="bento-title">Workload Intensity Forecast (0 = Free, 10 = Heavy Crunch)</div>', unsafe_allow_html=True)
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=load_df["date"],
             y=load_df["intensity"],
             mode="lines+markers",
-            name="Workload Intensity",
-            line=dict(color="#6366f1", width=3, shape="spline", smoothing=0.4),
+            line=dict(color="#8D7588", width=3, shape="spline", smoothing=0.4),
             fill="tozeroy",
-            fillcolor="rgba(99, 102, 241, 0.10)",
-            marker=dict(color=load_df["color"], size=8, line=dict(width=1, color="white")),
-            hovertemplate="<b>%{x|%b %d, %Y}</b><br>Workload Intensity: <b>%{y}/10</b><extra></extra>",
+            fillcolor="rgba(141, 117, 136, 0.16)",
+            marker=dict(color=load_df["color"], size=7, line=dict(width=1, color="white")),
+            hovertemplate="<b>%{x|%b %d}</b> • Intensity: <b>%{y}/10</b><extra></extra>",
         ))
-        fig.add_hline(
-            y=peak_threshold,
-            line_dash="dash",
-            line_color="#ef4444",
-            annotation_text=f"Your Peak Threshold ({peak_threshold}/10)",
-            annotation_position="top left",
-        )
+        fig.add_hline(y=peak_threshold, line_dash="dash", line_color="#D96B78")
         fig.update_layout(
-            xaxis=dict(
-                rangeselector=dict(buttons=[
-                    dict(count=7, label="1w", step="day", stepmode="backward"),
-                    dict(count=1, label="1m", step="month", stepmode="backward"),
-                    dict(step="all", label="Semester"),
-                ]),
-                rangeslider=dict(visible=True),
-                type="date",
-            ),
-            yaxis=dict(
-                title="Workload Intensity (0–10)",
-                range=[-0.4, 10.6],
-                tickmode="array",
-                tickvals=[0, 2.5, 5, 7.5, 10],
-                ticktext=["0 (Free)", "2.5", "5 (Moderate)", "7.5", "10 (Max Load)"],
-            ),
-            height=400,
-            margin=dict(l=20, r=20, t=30, b=20),
-            hovermode="x unified",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(range=[-0.4, 10.5], tickvals=[0, 5, 10], ticktext=["0 (Free)", "5", "10 (Max)"], gridcolor="#DFD6D8"),
+            xaxis=dict(showgrid=False),
+            height=220,
+            margin=dict(l=10, r=10, t=10, b=10),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Right-Hand Plum Progress Panel with Circular Completion Rings
+    with right_rail:
+        ring_colors = ["#EB7A88", "#65C3BA", "#F0B95B", "#9CC5E9"]
+        rings_html = render_progress_ring("Overall Coursework", overall_pct, ring_colors[0])
+        for idx, (c_name, c_pct) in enumerate(course_stats[:3]):
+            rings_html += render_progress_ring(c_name, c_pct, ring_colors[(idx + 1) % len(ring_colors)])
+
+        st.markdown(f"""
+        <div class="plum-panel">
+            {rings_html}
+            <div style="text-align:center; font-size:0.82rem; font-weight:600; color:#F5EFF3; padding-top:4px;">
+                {done_items} of {total_items} tasks done
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+elif nav_page == "Workload Forecast":
+    st.subheader("Semester Workload Forecast")
+    chart_mode = st.radio("View Mode", ["Total Intensity Line", "Stacked by Course"], horizontal=True)
+    with st.expander(f"Workload Scale Guide (0–10, calibrated to {daily_capacity}h/day)"):
+        st.markdown("- **0–2.9 (Green):** Free / Light\n- **3.0–6.4 (Yellow):** Moderate\n- **6.5–10.0 (Red):** Heavy Crunch")
+
+    if chart_mode == "Total Intensity Line":
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=load_df["date"], y=load_df["intensity"], mode="lines+markers",
+            line=dict(color="#8D7588", width=3, shape="spline", smoothing=0.4),
+            fill="tozeroy", fillcolor="rgba(141, 117, 136, 0.16)",
+            marker=dict(color=load_df["color"], size=8, line=dict(width=1, color="white")),
+            hovertemplate="<b>%{x|%b %d, %Y}</b><br>Intensity: <b>%{y}/10</b><extra></extra>",
+        ))
+        fig.add_hline(y=peak_threshold, line_dash="dash", line_color="#D96B78", annotation_text=f"Peak ({peak_threshold}/10)")
+        fig.update_layout(
+            paper_bgcolor="#EBE4E6", plot_bgcolor="#F7F3EE",
+            xaxis=dict(rangeslider=dict(visible=True), type="date"),
+            yaxis=dict(title="Workload Intensity (0–10)", range=[-0.4, 10.6], tickvals=[0, 2.5, 5, 7.5, 10], ticktext=["0 (Free)", "2.5", "5 (Moderate)", "7.5", "10 (Max)"]),
+            height=430,
         )
         st.plotly_chart(fig, use_container_width=True)
     else:
         course_daily = raw_daily.groupby(["date", "course"], as_index=False)["load"].sum()
         course_daily["intensity"] = (course_daily["load"] / max_reference_effort * 10).clip(0, 10).round(2)
-        fig_stack = px.area(
-            course_daily,
-            x="date",
-            y="intensity",
-            color="course",
-            labels={"intensity": "Workload Intensity (0–10)", "date": "Date", "course": "Course"},
-        )
-        fig_stack.update_layout(
-            xaxis=dict(rangeslider=dict(visible=True), type="date"),
-            yaxis=dict(range=[0, 10.6]),
-            height=400,
-            margin=dict(l=20, r=20, t=30, b=20),
-            hovermode="x unified",
-        )
+        fig_stack = px.area(course_daily, x="date", y="intensity", color="course")
+        fig_stack.update_layout(paper_bgcolor="#EBE4E6", plot_bgcolor="#F7F3EE", yaxis=dict(range=[0, 10.6]), height=430)
         st.plotly_chart(fig_stack, use_container_width=True)
 
-    # ---------- Daily Brief ----------
-    st.subheader("Daily Brief")
-    today = pd.Timestamp.now().normalize()
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        st.markdown("#### Needs Attention")
-        urgent = filtered_df[
-            (filtered_df["done"] == "no")
-            & (filtered_df["date"] >= today)
-            & (filtered_df["date"] <= today + pd.Timedelta(days=7))
-            & (filtered_df["difficulty"] >= 4)
-        ]
-        if urgent.empty:
-            st.caption("No high-difficulty deadlines in the next 7 days.")
-        else:
-            for _, r in urgent.sort_values("date").iterrows():
-                st.warning(f"**[{r['course']}] {r['title']}** — Due {r['date'].strftime('%b %d')} • Diff {r['difficulty']}/5")
-
-    with c2:
-        st.markdown("#### Today & This Week")
-        this_week = filtered_df[
-            (filtered_df["date"] >= today) & (filtered_df["date"] <= today + pd.Timedelta(days=7))
-        ].sort_values("date")
-        if this_week.empty:
-            st.caption("Nothing scheduled for the next 7 days.")
-        else:
-            for _, r in this_week.iterrows():
-                badge = "🔴" if r["difficulty"] >= 4 else ("🟡" if r["difficulty"] == 3 else "🟢")
-                strike = "~~" if r["done"] == "yes" else ""
-                st.write(f"{badge} {strike}**[{r['course']}] {r['title']}** ({r['date'].strftime('%a %b %d')}) — {r['hours']}h{strike}")
-
-    with c3:
-        st.markdown("#### Resolved / Completed")
-        completed = filtered_df[filtered_df["done"] == "yes"].sort_values("date", ascending=False)
-        if completed.empty:
-            st.caption("No items marked done yet.")
-        else:
-            for _, r in completed.iterrows():
-                st.success(f"✓ [{r['course']}] {r['title']} ({r['date'].strftime('%b %d')})")
-
-with tab_cal:
+elif nav_page == "Full Calendar":
     st.subheader("Interactive Semester Calendar")
-    st.caption("Color-coded by difficulty: 🔴 High (4–5) • 🟡 Medium (3) • 🟢 Low (1–2) • ⚪ Completed")
-
     cal_events = []
     for _, r in filtered_df.iterrows():
-        if r["done"] == "yes":
-            bg = "#9ca3af"
-        elif r["difficulty"] >= 4:
-            bg = "#ef4444"
-        elif r["difficulty"] == 3:
-            bg = "#eab308"
-        else:
-            bg = "#22c55e"
-
+        bg = "#9ca3af" if r["done"] == "yes" else ("#D96B78" if r["difficulty"] >= 4 else ("#E5A93B" if r["difficulty"] == 3 else "#5BB396"))
         cal_events.append({
             "title": f"[{r['course']}] {r['title']} ({r['hours']}h)",
             "start": r["date"].strftime("%Y-%m-%d"),
@@ -594,35 +863,22 @@ with tab_cal:
             "backgroundColor": bg,
             "borderColor": bg,
         })
-
     calendar(
         events=cal_events,
-        options={
-            "initialView": "dayGridMonth",
-            "headerToolbar": {
-                "left": "prev,next today",
-                "center": "title",
-                "right": "dayGridMonth,listWeek",
-            },
-            "height": 620,
-        },
-        key="semester_calendar_grid",
+        options={"initialView": "dayGridMonth", "headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth,listWeek"}, "height": 620},
+        key="full_cal_grid",
     )
 
-with tab_table:
-    st.subheader("Edit, Re-tag, or Delete Schedule Items")
-    st.caption("Double-click any cell to edit course tags, dates, hours, or difficulty, check off completed work, or select rows to delete.")
-
+elif nav_page == "Master Task Editor":
+    st.subheader("Check Off, Edit, or Delete Tasks")
+    st.caption("Checking off tasks here immediately updates your circular completion rings on the Dashboard.")
     edit_df = filtered_df[["id", "done", "course", "date", "title", "type", "hours", "difficulty"]].sort_values("date").copy()
     edit_df["done"] = edit_df["done"] == "yes"
     edit_df["date"] = edit_df["date"].dt.date
     edit_df["Delete"] = False
 
     edited = st.data_editor(
-        edit_df,
-        hide_index=True,
-        use_container_width=True,
-        disabled=["id"],
+        edit_df, hide_index=True, use_container_width=True, disabled=["id"],
         column_config={
             "id": None,
             "done": st.column_config.CheckboxColumn("Done", width="small"),
@@ -631,7 +887,7 @@ with tab_table:
             "title": st.column_config.TextColumn("Title", width="large"),
             "type": st.column_config.SelectboxColumn("Type", options=["assignment", "exam", "quiz", "reading", "recurring", "job"], width="small"),
             "hours": st.column_config.NumberColumn("Hours", min_value=0.25, max_value=40.0, step=0.25, width="small"),
-            "difficulty": st.column_config.NumberColumn("Diff (1-5)", min_value=1, max_value=5, step=1, width="small"),
+            "difficulty": st.column_config.NumberColumn("Diff", min_value=1, max_value=5, step=1, width="small"),
             "Delete": st.column_config.CheckboxColumn("Delete?", width="small"),
         },
         key="master_editor",
@@ -646,12 +902,9 @@ with tab_table:
                 continue
             orig = orig_by_id.get(rid, {})
             if (
-                row["done"] != orig.get("done")
-                or row["course"] != orig.get("course")
-                or str(row["date"]) != str(orig.get("date"))
-                or row["title"] != orig.get("title")
-                or row["type"] != orig.get("type")
-                or float(row["hours"]) != float(orig.get("hours"))
+                row["done"] != orig.get("done") or row["course"] != orig.get("course")
+                or str(row["date"]) != str(orig.get("date")) or row["title"] != orig.get("title")
+                or row["type"] != orig.get("type") or float(row["hours"]) != float(orig.get("hours"))
                 or int(row["difficulty"]) != int(orig.get("difficulty"))
             ):
                 supabase.table("items").update({
@@ -663,13 +916,12 @@ with tab_table:
                     "hours": float(row["hours"]),
                     "difficulty": int(row["difficulty"]),
                 }).eq("id", rid).execute()
-        st.success("All changes saved to your database!")
+        st.success("Saved!")
         st.rerun()
 
-with tab_coach:
+elif nav_page == "AI Study Coach":
     st.subheader("AI Crunch-Week Study Plan Generator")
-    st.write(f"Analyze your upcoming red/yellow workload spikes against your **{daily_capacity}h/day** study capacity and generate a day-by-day schedule.")
-
+    st.write(f"Generates a streaming 7-day plan calibrated to your **{daily_capacity}h/day** study capacity.")
     if st.button("Generate My 7-Day Study Plan", type="primary"):
         try:
             plan_text = st.write_stream(stream_study_plan(filtered_df, load_df))
