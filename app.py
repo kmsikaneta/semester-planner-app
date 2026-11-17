@@ -16,6 +16,8 @@ from google import genai
 from supabase import create_client
 from streamlit_calendar import calendar
 import streamlit as st
+from google import genai
+from google.genai import types
 
 st.set_page_config(page_title="Semester Planner", layout="wide")
 
@@ -245,7 +247,7 @@ def parse_syllabus_multimodal(uploaded_file=None, pasted_text: str = "", default
     raw = response.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(raw)
 
-def generate_study_plan(df: pd.DataFrame, load_df: pd.DataFrame) -> str:
+def stream_study_plan(df: pd.DataFrame, load_df: pd.DataFrame):
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
     today = pd.Timestamp.now().normalize()
     upcoming_items = df[(df["done"] == "no") & (df["date"] >= today) & (df["date"] <= today + pd.Timedelta(days=14))]
@@ -256,15 +258,23 @@ def generate_study_plan(df: pd.DataFrame, load_df: pd.DataFrame) -> str:
 
     prompt = f"""
     You are an academic coach for {display_name}. Today is {today.strftime('%Y-%m-%d')}.
-    Their target daily study capacity is {daily_capacity} hours/day.
-    Upcoming peak workload days (0-10 scale): {peaks_summary}
-    Upcoming unfinished tasks for the next 14 days: {items_summary}
+    Daily capacity: {daily_capacity}h/day.
+    Peak days (0-10): {peaks_summary}
+    Tasks (next 14 days): {items_summary}
 
-    Create a concise, actionable day-by-day study plan for the next 7 days to flatten their peak crunch days.
-    Group recommendations by day, name exact courses and assignments, and suggest realistic hour blocks within their {daily_capacity}h/day limit.
+    Write a concise, bulleted 7-day study plan to flatten peak crunch days. Name exact courses, tasks, and realistic hour blocks within {daily_capacity}h/day. Keep it brief and scannable.
     """
-    res = client.models.generate_content(model=MODEL_ID, contents=prompt)
-    return res.text
+    response = client.models.generate_content_stream(
+        model=MODEL_ID,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+            max_output_tokens=700,
+        ),
+    )
+    for chunk in response:
+        if chunk.text:
+            yield chunk.text
 
 # ---------- Sidebar Controls ----------
 with st.sidebar:
@@ -659,10 +669,12 @@ with tab_table:
 with tab_coach:
     st.subheader("AI Crunch-Week Study Plan Generator")
     st.write(f"Analyze your upcoming red/yellow workload spikes against your **{daily_capacity}h/day** study capacity and generate a day-by-day schedule.")
+
     if st.button("Generate My 7-Day Study Plan", type="primary"):
-        with st.spinner("Analyzing your upcoming deadlines and workload peaks..."):
-            try:
-                plan_md = generate_study_plan(filtered_df, load_df)
-                st.markdown(plan_md)
-            except Exception as e:
-                st.error(f"Could not generate study plan: {e}")
+        try:
+            plan_text = st.write_stream(stream_study_plan(filtered_df, load_df))
+            st.session_state["cached_study_plan"] = plan_text
+        except Exception as e:
+            st.error(f"Could not generate study plan: {e}")
+    elif "cached_study_plan" in st.session_state:
+        st.markdown(st.session_state["cached_study_plan"])
