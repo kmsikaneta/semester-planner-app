@@ -1,186 +1,86 @@
-import os
-
-import numpy as np
-import pandas as pd
-import plotly.express as px
-import streamlit as st
-
-DATA_FILE = "items.csv" if os.path.exists("items.csv") else "sample_items.csv"
-
-st.set_page_config(page_title="Semester Planner", layout="wide")
-st.title("Semester Planner")
-
-# ---------- Add-item form (sidebar) ----------
-with st.sidebar:
-    st.header("Add an item")
-    with st.form("add_item", clear_on_submit=True):
-        new_title = st.text_input("Title")
-        new_date = st.date_input("Date")
-        new_type = st.selectbox("Type", ["assignment", "exam", "recurring", "job", "other"])
-        new_hours = st.number_input("Estimated hours", min_value=0.25, max_value=40.0, value=1.0, step=0.25)
-        new_difficulty = st.slider("Difficulty (1 easy, 5 hard)", 1, 5, 3)
-        submitted = st.form_submit_button("Add")
-
-    if submitted:
-        if new_title.strip() == "":
-            st.warning("Please enter a title.")
-        else:
-            existing = pd.read_csv(DATA_FILE)
-            new_row = pd.DataFrame([{
-                "date": new_date.strftime("%Y-%m-%d"),
-                "title": new_title.strip(),
-                "type": new_type,
-                "hours": new_hours,
-                "difficulty": new_difficulty,
-                "done": "no",
-            }])
-            pd.concat([existing, new_row], ignore_index=True).to_csv(DATA_FILE, index=False)
-            st.success("Added!")
-
-# ---------- Load data and compute load ----------
-df = pd.read_csv(DATA_FILE, parse_dates=["date"])
-df["effort"] = df["hours"] * (0.5 + df["difficulty"] * 0.25)
-
-SPREAD_DAYS = {"exam": 7, "assignment": 4}
-
-rows = []
-for _, r in df.iterrows():
-    n = SPREAD_DAYS.get(r["type"], 1)
-    days = pd.date_range(end=r["date"], periods=n)
-    weights = np.arange(1, n + 1)
-    weights = weights / weights.sum()
-    for d, w in zip(days, weights):
-        rows.append({"date": d, "effort": r["effort"] * w})
-
-spread = pd.DataFrame(rows)
-daily = spread.groupby("date")["effort"].sum().asfreq("D", fill_value=0).reset_index()
-
-low = daily["effort"].quantile(1 / 3)
-high = daily["effort"].quantile(2 / 3)
-
-def level(x):
-    if x <= low:
-        return "Low"
-    elif x <= high:
-        return "Medium"
-    return "High"
-
-daily["level"] = daily["effort"].apply(level)
-threshold = daily["effort"].mean() + daily["effort"].std()
-daily["peak"] = daily["effort"] > threshold
-
-# ---------- Morning brief ----------
-today = pd.Timestamp.today().normalize()
-st.header("Morning brief")
-
-col1, col2, col3 = st.columns(3)
-
-week = daily[(daily["date"] >= today) & (daily["date"] < today + pd.Timedelta(days=7))]
-col1.metric("Load this week", round(week["effort"].sum(), 1))
-
-upcoming_peaks = daily[(daily["date"] >= today) & daily["peak"]]
-if upcoming_peaks.empty:
-    col2.metric("Next peak day", "None coming up")
-else:
-    col2.metric("Next peak day", upcoming_peaks.iloc[0]["date"].strftime("%b %d"))
-
-todays = daily[daily["date"] == today]
-col3.metric("Today's level", todays.iloc[0]["level"] if not todays.empty else "No data")
-
-st.subheader("Today (tick the box when something is done)")
-today_items = df[df["date"] == today].copy()
-if today_items.empty:
-    st.write("Nothing scheduled today.")
-else:
-    today_items["done"] = today_items["done"] == "yes"
-    edited = st.data_editor(
-        today_items[["title", "type", "hours", "difficulty", "done"]],
-        disabled=["title", "type", "hours", "difficulty"],
-        hide_index=True,
-    )
-    changed = edited["done"] != today_items["done"]
-    if changed.any():
-        full = pd.read_csv(DATA_FILE)
-        for idx in edited.index[changed]:
-            full.loc[idx, "done"] = "yes" if edited.loc[idx, "done"] else "no"
-        full.to_csv(DATA_FILE, index=False)
-        st.rerun()
-
-st.subheader("Needs attention (next 3 days, not done, difficulty 4+)")
-soon = df[
-    (df["date"] >= today)
-    & (df["date"] <= today + pd.Timedelta(days=3))
-    & (df["done"] == "no")
-    & (df["difficulty"] >= 4)
-    & (df["type"] != "recurring")
-].copy()
-soon["date"] = soon["date"].dt.strftime("%b %d")
-if soon.empty:
-    st.write("Nothing urgent.")
-else:
-    st.dataframe(soon[["date", "title", "type", "hours", "difficulty"]])
-
-st.subheader("Resolved (finished in the last 7 days)")
-resolved = df[
-    (df["done"] == "yes")
-    & (df["date"] >= today - pd.Timedelta(days=7))
-    & (df["date"] <= today)
-    & (df["type"] != "recurring")
-].copy()
-if resolved.empty:
-    st.write("Nothing marked done yet.")
-else:
-    resolved["date"] = resolved["date"].dt.strftime("%b %d")
-    st.dataframe(resolved[["date", "title", "type", "hours", "difficulty"]], hide_index=True)
-
-# ---------- Semester graph ----------
-st.header("Semester load")
-
-fig = px.line(daily, x="date", y="effort")
-dots = px.scatter(
-    daily, x="date", y="effort", color="level",
-    color_discrete_map={"Low": "green", "Medium": "gold", "High": "red"},
-)
-for trace in dots.data:
-    fig.add_trace(trace)
-
-peaks = daily[daily["peak"]]
-fig.add_scatter(
-    x=peaks["date"], y=peaks["effort"], mode="markers",
-    marker=dict(symbol="star", size=16, color="black"), name="Peak",
-)
-fig.update_xaxes(rangeslider_visible=True)
-
-st.plotly_chart(fig)
-
-import os
 import json
 from datetime import datetime, timedelta
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import icalendar
 import recurring_ical_events
 from pypdf import PdfReader
 from google import genai
+from supabase import create_client
 import streamlit as st
 
 st.set_page_config(page_title="Semester Planner", layout="wide")
 
-DATA_FILE = "items.csv" if os.path.exists("items.csv") else "sample_items.csv"
+# Initialize Supabase client
+supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
-# 1. Isolate each visitor's schedule in session_state
-if "df" not in st.session_state:
-    st.session_state["df"] = pd.read_csv(DATA_FILE, parse_dates=["date"])
+# ---------- Authentication Gate ----------
+if "user" not in st.session_state:
+    st.session_state["user"] = None
 
-# Helper to append new rows safely
+if st.session_state["user"] is None:
+    st.title("Semester Planner")
+    st.subheader("Sign in or create an account to manage your semester workload")
+
+    tab_login, tab_signup = st.tabs(["Log In", "Sign Up"])
+
+    with tab_login:
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            if st.form_submit_button("Log In"):
+                try:
+                    res = supabase.auth.sign_in_with_password({"email": email, "password": password})
+                    st.session_state["user"] = res.user
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Login failed: {e}")
+
+    with tab_signup:
+        with st.form("signup_form"):
+            new_email = st.text_input("Email")
+            new_password = st.text_input("Password (min 6 characters)", type="password")
+            if st.form_submit_button("Create Account"):
+                try:
+                    res = supabase.auth.sign_up({"email": new_email, "password": new_password})
+                    if res.user:
+                        st.session_state["user"] = res.user
+                        st.success("Account created!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Sign up failed: {e}")
+
+    st.stop()
+
+# ---------- Logged-In User Helpers ----------
+user_id = st.session_state["user"].id
+
+def load_user_df() -> pd.DataFrame:
+    res = supabase.table("items").select("*").eq("user_id", user_id).execute()
+    if not res.data:
+        return pd.DataFrame(columns=["id", "date", "title", "type", "hours", "difficulty", "done"])
+    df = pd.DataFrame(res.data)
+    df["date"] = pd.to_datetime(df["date"])
+    df["hours"] = df["hours"].astype(float)
+    df["difficulty"] = df["difficulty"].astype(int)
+    return df
+
 def add_rows(new_rows: list[dict]):
     if not new_rows:
         return
-    new_df = pd.DataFrame(new_rows)
-    new_df["date"] = pd.to_datetime(new_df["date"])
-    st.session_state["df"] = pd.concat([st.session_state["df"], new_df], ignore_index=True)
+    for row in new_rows:
+        row["user_id"] = user_id
+    supabase.table("items").insert(new_rows).execute()
 
-# 2. Import Google Calendar or Canvas .ics URL
+def toggle_done(item_id: int, current_status: str):
+    new_status = "yes" if current_status == "no" else "no"
+    supabase.table("items").update({"done": new_status}).eq("id", item_id).execute()
+
+def delete_item(item_id: int):
+    supabase.table("items").delete().eq("id", item_id).execute()
+
 def parse_ics_url(ics_url: str) -> list[dict]:
     resp = requests.get(ics_url.strip(), timeout=15)
     resp.raise_for_status()
@@ -195,13 +95,7 @@ def parse_ics_url(ics_url: str) -> list[dict]:
         title = str(event.get("SUMMARY", "Calendar Event")).replace(",", " ")
         dtstart = event.get("DTSTART").dt
         dtend = event.get("DTEND").dt if event.get("DTEND") else dtstart
-
-        if hasattr(dtstart, "hour"):
-            duration_hrs = round(max((dtend - dtstart).total_seconds() / 3600, 0.5), 2)
-            date_str = dtstart.strftime("%Y-%m-%d")
-        else:
-            duration_hrs = 2.0
-            date_str = dtstart.strftime("%Y-%m-%d")
+        duration_hrs = round(max((dtend - dtstart).total_seconds() / 3600, 0.5), 2) if hasattr(dtstart, "hour") else 2.0
 
         lower = title.lower()
         if any(w in lower for w in ["exam", "midterm", "final", "test", "quiz"]):
@@ -212,7 +106,7 @@ def parse_ics_url(ics_url: str) -> list[dict]:
             item_type, diff = "recurring", 2
 
         rows.append({
-            "date": date_str,
+            "date": dtstart.strftime("%Y-%m-%d"),
             "title": title,
             "type": item_type,
             "hours": duration_hrs,
@@ -221,7 +115,6 @@ def parse_ics_url(ics_url: str) -> list[dict]:
         })
     return rows
 
-# 3. Parse PDF Syllabus using Gemini API
 def parse_syllabus_pdf(uploaded_file) -> list[dict]:
     reader = PdfReader(uploaded_file)
     full_text = "\n".join(page.extract_text() or "" for page in reader.pages)
@@ -233,41 +126,47 @@ def parse_syllabus_pdf(uploaded_file) -> list[dict]:
     - "date": "YYYY-MM-DD" (use 2026 if year is omitted)
     - "title": string without commas
     - "type": "exam" or "assignment"
-    - "hours": estimated study/work hours (number, e.g. 2, 4, 8)
+    - "hours": estimated study/work hours (number)
     - "difficulty": integer from 1 to 5
     - "done": "no"
 
     Syllabus text:
     {full_text[:15000]}
     """
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-    )
+    response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
     raw = response.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(raw)
 
 # ---------- Sidebar Controls ----------
 with st.sidebar:
+    st.caption(f"Signed in as **{st.session_state['user'].email}**")
+    if st.button("Log Out"):
+        supabase.auth.sign_out()
+        st.session_state["user"] = None
+        st.rerun()
+
+    st.divider()
     st.header("1. Import Schedule")
 
-    with st.expander("Connect Google Calendar / Canvas (.ics)", expanded=False):
+    with st.expander("Connect Google Calendar / Canvas (.ics)"):
         ics_link = st.text_input("Paste secret .ics URL", placeholder="[https://calendar.google.com/calendar/ical/](https://calendar.google.com/calendar/ical/)...")
         if st.button("Import Calendar Events") and ics_link:
             try:
                 imported = parse_ics_url(ics_link)
                 add_rows(imported)
-                st.success(f"Imported {len(imported)} events!")
+                st.success(f"Saved {len(imported)} events!")
+                st.rerun()
             except Exception as e:
                 st.error(f"Could not read calendar link: {e}")
 
-    with st.expander("Upload Syllabus (PDF)", expanded=False):
+    with st.expander("Upload Syllabus (PDF)"):
         pdf_file = st.file_uploader("Upload course syllabus", type=["pdf"])
         if st.button("Extract Syllabus Deadlines") and pdf_file:
             try:
                 extracted = parse_syllabus_pdf(pdf_file)
                 add_rows(extracted)
-                st.success(f"Added {len(extracted)} syllabus items!")
+                st.success(f"Saved {len(extracted)} syllabus items!")
+                st.rerun()
             except Exception as e:
                 st.error(f"Syllabus parsing failed: {e}")
 
@@ -288,22 +187,138 @@ with st.sidebar:
                 "difficulty": difficulty,
                 "done": "no",
             }])
-            st.success("Added!")
+            st.rerun()
 
-    st.divider()
-    st.header("3. Save / Load Your Data")
-    csv_bytes = st.session_state["df"].to_csv(index=False).encode("utf-8")
-    st.download_button("Download My Schedule (.csv)", data=csv_bytes, file_name="my_semester.csv", mime="text/csv")
+# ---------- Load User Data & Compute Workload ----------
+st.title("Semester Planner")
+df = load_user_df()
 
-    uploaded_csv = st.file_uploader("Load Saved Schedule (.csv)", type=["csv"])
-    if uploaded_csv is not None:
-        st.session_state["df"] = pd.read_csv(uploaded_csv, parse_dates=["date"])
-        st.success("Loaded your schedule!")
+if df.empty:
+    st.info("Your schedule is empty! Use the sidebar to import your Canvas/Google Calendar, upload a PDF syllabus, or add an item manually.")
+    st.stop()
 
-    if st.button("Clear All & Start Fresh"):
-        st.session_state["df"] = st.session_state["df"].iloc[0:0]
-        st.rerun()
-
-# ---------- Load data and compute load ----------
-df = st.session_state["df"].copy()
 df["effort"] = df["hours"] * (0.5 + df["difficulty"] * 0.25)
+
+SPREAD_DAYS = {"exam": 7, "assignment": 4}
+daily_records = []
+
+for _, row in df.iterrows():
+    spread = SPREAD_DAYS.get(row["type"], 1)
+    weights = np.arange(1, spread + 1, dtype=float)
+    weights /= weights.sum()
+
+    for offset, w in enumerate(reversed(weights)):
+        day = row["date"] - pd.Timedelta(days=offset)
+        daily_records.append({
+            "date": day.normalize(),
+            "load": row["effort"] * w,
+        })
+
+load_df = pd.DataFrame(daily_records).groupby("date", as_index=False)["load"].sum()
+full_range = pd.date_range(load_df["date"].min(), load_df["date"].max(), freq="D")
+load_df = load_df.set_index("date").reindex(full_range, fill_value=0.0).rename_axis("date").reset_index()
+
+mean_load = load_df["load"].mean()
+std_load = load_df["load"].std()
+peak_threshold = mean_load + std_load
+
+q33, q66 = np.percentile(load_df["load"], [33, 66])
+def load_color(val):
+    if val >= q66 and val > 0:
+        return "#ef4444"  # Red (high load)
+    elif val >= q33 and val > 0:
+        return "#eab308"  # Yellow (medium load)
+    return "#22c55e"      # Green (light load)
+
+load_df["color"] = load_df["load"].apply(load_color)
+
+# ---------- Workload Line Graph with Zoom ----------
+st.subheader("Semester Workload Forecast")
+fig = go.Figure()
+
+fig.add_trace(go.Scatter(
+    x=load_df["date"],
+    y=load_df["load"],
+    mode="lines+markers",
+    name="Daily Load",
+    line=dict(color="#6366f1", width=2.5),
+    marker=dict(color=load_df["color"], size=8),
+))
+
+fig.add_hline(
+    y=peak_threshold,
+    line_dash="dash",
+    line_color="#ef4444",
+    annotation_text="Peak Threshold (+1 SD)",
+    annotation_position="top left",
+)
+
+fig.update_layout(
+    xaxis=dict(
+        rangeselector=dict(
+            buttons=[
+                dict(count=7, label="1w", step="day", stepmode="backward"),
+                dict(count=1, label="1m", step="month", stepmode="backward"),
+                dict(step="all", label="Semester"),
+            ]
+        ),
+        rangeslider=dict(visible=True),
+        type="date",
+    ),
+    yaxis_title="Weighted Effort Score",
+    height=380,
+    margin=dict(l=20, r=20, t=30, b=20),
+)
+st.plotly_chart(fig, use_container_width=True)
+
+# ---------- Daily Morning Brief ----------
+st.subheader("Daily Morning Brief")
+today = pd.Timestamp.now().normalize()
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.markdown("#### Needs Attention (High Difficulty / Due Soon)")
+    urgent = df[(df["done"] == "no") & (df["date"] >= today) & (df["date"] <= today + pd.Timedelta(days=7)) & (df["difficulty"] >= 4)]
+    if urgent.empty:
+        st.caption("No high-difficulty deadlines in the next 7 days.")
+    else:
+        for _, r in urgent.sort_values("date").iterrows():
+            st.warning(f"**{r['title']}** ({r['type']}) — Due {r['date'].strftime('%b %d')} • Difficulty {r['difficulty']}/5")
+
+with col2:
+    st.markdown("#### Today & This Week")
+    this_week = df[(df["date"] >= today) & (df["date"] <= today + pd.Timedelta(days=7))].sort_values("date")
+    if this_week.empty:
+        st.caption("Nothing scheduled for the next 7 days.")
+    else:
+        for _, r in this_week.iterrows():
+            badge = "🔴" if r["difficulty"] >= 4 else ("🟡" if r["difficulty"] == 3 else "🟢")
+            status = "~~" if r["done"] == "yes" else ""
+            st.write(f"{badge} {status}**{r['title']}** ({r['date'].strftime('%a %b %d')}) — {r['hours']}h{status}")
+
+with col3:
+    st.markdown("#### Resolved / Completed")
+    completed = df[df["done"] == "yes"].sort_values("date", ascending=False)
+    if completed.empty:
+        st.caption("No items marked done yet.")
+    else:
+        for _, r in completed.iterrows():
+            st.success(f"✓ {r['title']} ({r['date'].strftime('%b %d')})")
+
+# ---------- Manage & Check Off Items ----------
+st.divider()
+st.subheader("All Scheduled Items")
+
+for _, row in df.sort_values("date").iterrows():
+    c1, c2, c3, c4, c5 = st.columns([0.5, 3, 1.5, 1.5, 0.7])
+    is_done = row["done"] == "yes"
+    if c1.checkbox("", value=is_done, key=f"chk_{row['id']}") != is_done:
+        toggle_done(int(row["id"]), row["done"])
+        st.rerun()
+    c2.write(f"**{row['title']}** ({row['type']})")
+    c3.write(row["date"].strftime("%Y-%m-%d"))
+    c4.write(f"{row['hours']}h • Diff {row['difficulty']}/5")
+    if c5.button("🗑️", key=f"del_{row['id']}"):
+        delete_item(int(row["id"]))
+        st.rerun()
