@@ -152,3 +152,158 @@ fig.add_scatter(
 fig.update_xaxes(rangeslider_visible=True)
 
 st.plotly_chart(fig)
+
+import os
+import json
+from datetime import datetime, timedelta
+import pandas as pd
+import requests
+import icalendar
+import recurring_ical_events
+from pypdf import PdfReader
+from google import genai
+import streamlit as st
+
+st.set_page_config(page_title="Semester Planner", layout="wide")
+
+DATA_FILE = "items.csv" if os.path.exists("items.csv") else "sample_items.csv"
+
+# 1. Isolate each visitor's schedule in session_state
+if "df" not in st.session_state:
+    st.session_state["df"] = pd.read_csv(DATA_FILE, parse_dates=["date"])
+
+# Helper to append new rows safely
+def add_rows(new_rows: list[dict]):
+    if not new_rows:
+        return
+    new_df = pd.DataFrame(new_rows)
+    new_df["date"] = pd.to_datetime(new_df["date"])
+    st.session_state["df"] = pd.concat([st.session_state["df"], new_df], ignore_index=True)
+
+# 2. Import Google Calendar or Canvas .ics URL
+def parse_ics_url(ics_url: str) -> list[dict]:
+    resp = requests.get(ics_url.strip(), timeout=15)
+    resp.raise_for_status()
+    cal = icalendar.Calendar.from_ical(resp.content)
+
+    start_window = datetime.now() - timedelta(days=7)
+    end_window = datetime.now() + timedelta(days=120)
+    events = recurring_ical_events.of(cal).between(start_window, end_window)
+
+    rows = []
+    for event in events:
+        title = str(event.get("SUMMARY", "Calendar Event")).replace(",", " ")
+        dtstart = event.get("DTSTART").dt
+        dtend = event.get("DTEND").dt if event.get("DTEND") else dtstart
+
+        if hasattr(dtstart, "hour"):
+            duration_hrs = round(max((dtend - dtstart).total_seconds() / 3600, 0.5), 2)
+            date_str = dtstart.strftime("%Y-%m-%d")
+        else:
+            duration_hrs = 2.0
+            date_str = dtstart.strftime("%Y-%m-%d")
+
+        lower = title.lower()
+        if any(w in lower for w in ["exam", "midterm", "final", "test", "quiz"]):
+            item_type, diff = "exam", 5
+        elif any(w in lower for w in ["homework", "hw", "project", "lab", "assignment", "paper"]):
+            item_type, diff = "assignment", 3
+        else:
+            item_type, diff = "recurring", 2
+
+        rows.append({
+            "date": date_str,
+            "title": title,
+            "type": item_type,
+            "hours": duration_hrs,
+            "difficulty": diff,
+            "done": "no",
+        })
+    return rows
+
+# 3. Parse PDF Syllabus using Gemini API
+def parse_syllabus_pdf(uploaded_file) -> list[dict]:
+    reader = PdfReader(uploaded_file)
+    full_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+    prompt = f"""
+    Extract all graded assignments, quizzes, projects, and exams with due dates from this syllabus.
+    Return ONLY a valid JSON array of objects with these exact keys:
+    - "date": "YYYY-MM-DD" (use 2026 if year is omitted)
+    - "title": string without commas
+    - "type": "exam" or "assignment"
+    - "hours": estimated study/work hours (number, e.g. 2, 4, 8)
+    - "difficulty": integer from 1 to 5
+    - "done": "no"
+
+    Syllabus text:
+    {full_text[:15000]}
+    """
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+    )
+    raw = response.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    return json.loads(raw)
+
+# ---------- Sidebar Controls ----------
+with st.sidebar:
+    st.header("1. Import Schedule")
+
+    with st.expander("Connect Google Calendar / Canvas (.ics)", expanded=False):
+        ics_link = st.text_input("Paste secret .ics URL", placeholder="[https://calendar.google.com/calendar/ical/](https://calendar.google.com/calendar/ical/)...")
+        if st.button("Import Calendar Events") and ics_link:
+            try:
+                imported = parse_ics_url(ics_link)
+                add_rows(imported)
+                st.success(f"Imported {len(imported)} events!")
+            except Exception as e:
+                st.error(f"Could not read calendar link: {e}")
+
+    with st.expander("Upload Syllabus (PDF)", expanded=False):
+        pdf_file = st.file_uploader("Upload course syllabus", type=["pdf"])
+        if st.button("Extract Syllabus Deadlines") and pdf_file:
+            try:
+                extracted = parse_syllabus_pdf(pdf_file)
+                add_rows(extracted)
+                st.success(f"Added {len(extracted)} syllabus items!")
+            except Exception as e:
+                st.error(f"Syllabus parsing failed: {e}")
+
+    st.divider()
+    st.header("2. Add Item Manually")
+    with st.form("add_item_form", clear_on_submit=True):
+        title = st.text_input("Title")
+        date = st.date_input("Date")
+        item_type = st.selectbox("Type", ["assignment", "exam", "quiz", "reading", "recurring", "job"])
+        hours = st.number_input("Estimated hours", min_value=0.25, max_value=40.0, value=1.0, step=0.25)
+        difficulty = st.slider("Difficulty (1 easy, 5 hard)", 1, 5, 3)
+        if st.form_submit_button("Add") and title.strip():
+            add_rows([{
+                "date": date.strftime("%Y-%m-%d"),
+                "title": title.strip().replace(",", " "),
+                "type": item_type,
+                "hours": hours,
+                "difficulty": difficulty,
+                "done": "no",
+            }])
+            st.success("Added!")
+
+    st.divider()
+    st.header("3. Save / Load Your Data")
+    csv_bytes = st.session_state["df"].to_csv(index=False).encode("utf-8")
+    st.download_button("Download My Schedule (.csv)", data=csv_bytes, file_name="my_semester.csv", mime="text/csv")
+
+    uploaded_csv = st.file_uploader("Load Saved Schedule (.csv)", type=["csv"])
+    if uploaded_csv is not None:
+        st.session_state["df"] = pd.read_csv(uploaded_csv, parse_dates=["date"])
+        st.success("Loaded your schedule!")
+
+    if st.button("Clear All & Start Fresh"):
+        st.session_state["df"] = st.session_state["df"].iloc[0:0]
+        st.rerun()
+
+# ---------- Load data and compute load ----------
+df = st.session_state["df"].copy()
+df["effort"] = df["hours"] * (0.5 + df["difficulty"] * 0.25)
