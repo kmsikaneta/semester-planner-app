@@ -372,9 +372,22 @@ def add_rows_dedup(new_rows: list[dict]) -> int:
         supabase.table("items").insert(unique_rows).execute()
     return len(unique_rows)
 
-def detect_course_code(summary: str) -> str:
-    match = re.search(r"\b([A-Z]{2,4}[\s-]?\d{3,4}[A-Z]?)\b", summary.upper())
-    return match.group(1).replace("-", " ") if match else "General"
+def detect_course_code(text: str) -> str:
+    if not text:
+        return "General"
+    # Matches patterns like MATH-2167, ITSC 3155, 202680-MATH-2167-001, CHEM1251L
+    match = re.search(r"(?<![A-Za-z])([A-Za-z]{2,5})[\s_-]?(\d{3,4}[A-Za-z]?)(?![0-9])", text)
+    if match:
+        dept = match.group(1).upper()
+        # Ignore common non-course words that precede numbers (e.g., Quiz 3, Exam 2, Lab 1, Test 3)
+        if dept not in {"QUIZ", "EXAM", "TEST", "LAB", "HW", "PART", "WEEK", "UNIT", "MOD", "CH", "PAGE"}:
+            return f"{dept} {match.group(2).upper()}"
+    return "General"
+
+def clean_canvas_title(raw_summary: str) -> str:
+    # Removes trailing/embedded Canvas bracket tags like [202680-MATH-2167-001-13789] for cleaner display
+    cleaned = re.sub(r"\[[^\]]*[A-Za-z]{2,5}[\s_-]?\d{3,4}[^\]]*\]", "", raw_summary).strip()
+    return cleaned if cleaned else raw_summary.strip()
 
 def parse_ics_url(ics_url: str) -> list[dict]:
     resp = requests.get(ics_url.strip(), timeout=15)
@@ -388,11 +401,21 @@ def parse_ics_url(ics_url: str) -> list[dict]:
     rows = []
     for event in events:
         raw_summary = str(event.get("SUMMARY", "Calendar Event")).replace(",", " ")
+        raw_desc = str(event.get("DESCRIPTION", ""))
+        raw_cats = str(event.get("CATEGORIES", ""))
+
         dtstart = event.get("DTSTART").dt
         dtend = event.get("DTEND").dt if event.get("DTEND") else dtstart
         duration_hrs = round(max((dtend - dtstart).total_seconds() / 3600, 0.5), 2) if hasattr(dtstart, "hour") else 2.0
 
+        # Check summary first, then Canvas description/categories for the course code
         course = detect_course_code(raw_summary)
+        if course == "General":
+            course = detect_course_code(raw_desc)
+        if course == "General":
+            course = detect_course_code(raw_cats)
+
+        clean_title = clean_canvas_title(raw_summary)
         lower = raw_summary.lower()
         if any(w in lower for w in ["exam", "midterm", "final", "test", "quiz"]):
             item_type, diff = "exam", 5
@@ -404,7 +427,7 @@ def parse_ics_url(ics_url: str) -> list[dict]:
         rows.append({
             "course": course,
             "date": dtstart.strftime("%Y-%m-%d"),
-            "title": raw_summary,
+            "title": clean_title,
             "type": item_type,
             "hours": duration_hrs,
             "difficulty": diff,
@@ -537,7 +560,19 @@ with st.sidebar:
                 st.rerun()
             except Exception as e:
                 st.error(f"Sync failed: {e}")
-
+        if st.button("Auto-Tag Existing 'General' Items"):
+            existing_gen = supabase.table("items").select("*").eq("user_id", user_id).eq("course", "General").execute().data
+            updated = 0
+            for item in existing_gen:
+                detected = detect_course_code(item["title"])
+                 if detected != "General":
+                    supabase.table("items").update({
+                        "course": detected,
+                        "title": clean_canvas_title(item["title"]),
+                 }).eq("id", item["id"]).execute()
+                updated += 1
+        st.success(f"Organized {updated} items into their courses!")
+        st.rerun()
     with st.expander("AI Syllabus Extractor"):
         course_tag = st.text_input("Course Tag (optional)", placeholder="e.g., ITSC 3155")
         syl_file = st.file_uploader("PDF, Word (.docx), or Image", type=["pdf", "docx", "png", "jpg", "jpeg"])
@@ -769,7 +804,7 @@ if nav_page == "Dashboard":
     with right_rail:
         ring_colors = ["#EB7A88", "#65C3BA", "#F0B95B", "#9CC5E9"]
         rings_html = render_progress_ring("Overall Coursework", overall_pct, ring_colors[0])
-        for idx, (c_name, c_pct) in enumerate(course_stats[:3]):
+        for idx, (c_name, c_pct) in enumerate(course_stats):
             rings_html += render_progress_ring(c_name, c_pct, ring_colors[(idx + 1) % len(ring_colors)])
 
         render_html(
