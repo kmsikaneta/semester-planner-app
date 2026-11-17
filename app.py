@@ -20,7 +20,11 @@ from supabase import create_client
 from streamlit_calendar import calendar
 import streamlit as st
 
+import busyness as bz
+
 st.set_page_config(page_title="Semester Planner", layout="wide", initial_sidebar_state="expanded")
+
+CHART_FONT = "Plus Jakarta Sans, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"
 
 MODEL_ID = "gemini-3.8-flash"
 
@@ -34,31 +38,43 @@ def render_html(raw_html: str):
     single_line = " ".join(line.strip() for line in raw_html.splitlines() if line.strip())
     st.markdown(single_line, unsafe_allow_html=True)
 
-# ---------- Custom Bento Aesthetic CSS ----------
+# ---------- Design System CSS (matches tokens.css from the design system) ----------
 render_html("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600..800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+:root {
+    --bg: #F7F6F3; --surface: #FFFFFF; --surface-sunken: #F0EEEA; --line: #E6E3DD;
+    --ink: #15171C; --ink-2: #464B57; --ink-3: #686D7A;
+    --font-display: "Bricolage Grotesque", "Plus Jakarta Sans", system-ui, sans-serif;
+    --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+    --shadow-card: 0 1px 2px rgba(21,23,28,0.05), 0 6px 20px rgba(21,23,28,0.05);
+}
 
 html, body, [class*="css"] {
-    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-family: var(--font-sans);
+}
+h1, h2, h3, .bento-title, .hero-title, .display {
+    font-family: var(--font-display) !important;
+    letter-spacing: -0.02em;
 }
 
 .stApp {
-    background-color: #F7F3EE;
-    color: #3E313B;
+    background-color: var(--bg);
+    color: var(--ink);
 }
 
 section[data-testid="stSidebar"] {
-    background-color: #E6E0DE;
-    border-right: 1px solid #D8CFD1;
+    background-color: var(--surface-sunken);
+    border-right: 1px solid var(--line);
 }
 
 div[data-testid="stTextInput"] input {
     border-radius: 999px !important;
-    background-color: #EDE7E5 !important;
-    border: 1px solid #D5CBCD !important;
+    background-color: var(--surface) !important;
+    border: 1px solid var(--line) !important;
     padding-left: 18px !important;
-    color: #3E313B !important;
+    color: var(--ink) !important;
 }
 
 button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitButton"] button {
@@ -66,22 +82,46 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     font-weight: 600 !important;
 }
 
+/* The hero: the semester graph on its own light stage */
+.st-key-hero {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 28px;
+    padding: 22px 26px 10px 26px;
+    box-shadow: var(--shadow-card);
+    margin-bottom: 8px;
+}
+.hero-head {
+    display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+}
+.hero-title {
+    font-size: 1.7rem; font-weight: 800; color: var(--ink); line-height: 1.1;
+}
+.hero-sub {
+    font-size: 0.95rem; color: var(--ink-2); margin-top: 6px;
+}
+.hero-sub b { color: var(--ink); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.78rem; color: var(--ink-3); font-weight: 600; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+
 .bento-card {
-    background-color: #EBE4E6;
-    border-radius: 22px;
+    background-color: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 20px;
     padding: 18px 20px;
     margin-bottom: 16px;
-    box-shadow: 0 2px 10px rgba(62, 49, 59, 0.04);
+    box-shadow: var(--shadow-card);
 }
 .bento-title {
-    font-size: 1.02rem;
+    font-size: 1.05rem;
     font-weight: 700;
-    color: #4A3B47;
+    color: var(--ink);
     margin-bottom: 12px;
 }
 
 .pill-row {
-    background-color: #F7F3EE;
+    background-color: var(--surface-sunken);
     border-radius: 999px;
     padding: 9px 16px;
     margin-bottom: 9px;
@@ -90,7 +130,7 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     justify-content: space-between;
     gap: 8px;
     font-size: 0.88rem;
-    color: #3E313B;
+    color: var(--ink);
 }
 .pill-left {
     display: flex;
@@ -100,11 +140,12 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     min-width: 0;
 }
 .pill-badge {
-    background-color: #EBE4E6;
-    color: #5C4958;
+    background-color: var(--surface);
+    border: 1px solid var(--line);
+    color: var(--ink-2);
     font-weight: 700;
     font-size: 0.75rem;
-    padding: 4px 10px;
+    padding: 3px 10px;
     border-radius: 999px;
     white-space: nowrap;
 }
@@ -116,7 +157,7 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
 }
 .pill-sub {
     font-size: 0.76rem;
-    color: #7D6B78;
+    color: var(--ink-3);
     white-space: nowrap;
 }
 
@@ -124,8 +165,8 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     min-width: 34px;
     height: 34px;
     border-radius: 50%;
-    background-color: #FFFFFF;
-    color: #4A3B47;
+    background-color: var(--surface);
+    color: var(--ink);
     font-weight: 700;
     font-size: 0.85rem;
     display: flex;
@@ -136,22 +177,24 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
 }
 
 .plum-panel {
-    background-color: #8D7588;
-    border-radius: 26px;
+    background-color: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 24px;
     padding: 16px 14px;
-    color: #FFFFFF;
+    color: var(--ink);
+    box-shadow: var(--shadow-card);
 }
 .plum-subcard {
-    background-color: #7B6376;
-    border-radius: 20px;
+    background-color: var(--surface-sunken);
+    border-radius: 18px;
     padding: 14px 10px;
-    margin-bottom: 14px;
+    margin-bottom: 12px;
     text-align: center;
 }
 .plum-label {
     font-size: 0.85rem;
-    font-weight: 600;
-    color: #F5EFF3;
+    font-weight: 700;
+    color: var(--ink-2);
     margin-bottom: 8px;
 }
 
@@ -165,7 +208,7 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     width: 46px;
     height: 46px;
     border-radius: 50%;
-    background: linear-gradient(135deg, #8D7588, #5A4556);
+    background: var(--ink);
     color: #FFFFFF;
     font-weight: 700;
     font-size: 1.15rem;
@@ -179,21 +222,21 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     border-collapse: collapse;
     text-align: center;
     font-size: 0.78rem;
-    color: #5A4A56;
-    background: #F7F3EE;
+    color: var(--ink-2);
+    background: var(--surface-sunken);
     border-radius: 16px;
     overflow: hidden;
 }
 .mini-cal th {
     padding: 6px 2px;
     font-weight: 700;
-    color: #8D7588;
+    color: var(--ink-3);
 }
 .mini-cal td {
     padding: 5px 2px;
 }
 .cal-today {
-    background-color: #8D7588;
+    background-color: var(--ink);
     color: #FFFFFF !important;
     border-radius: 50%;
     font-weight: 700;
@@ -203,13 +246,12 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     line-height: 22px;
 }
 .cal-due {
-    border: 1.5px solid #D9777F;
     border-radius: 50%;
     font-weight: 700;
     display: inline-block;
     width: 22px;
     height: 22px;
-    line-height: 20px;
+    line-height: 22px;
 }
 
 .course-chip {
@@ -343,19 +385,20 @@ def render_progress_ring(label: str, pct: int, stroke_color: str) -> str:
         f'<div class="plum-subcard">'
         f'<div class="plum-label">{esc(label)}</div>'
         f'<svg width="88" height="88" viewBox="0 0 88 88">'
-        f'<circle cx="44" cy="44" r="{radius}" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="7" />'
+        f'<circle cx="44" cy="44" r="{radius}" fill="none" stroke="#E6E3DD" stroke-width="7" />'
         f'<circle cx="44" cy="44" r="{radius}" fill="none" stroke="{stroke_color}" stroke-width="7" '
         f'stroke-dasharray="{circumference:.1f}" stroke-dashoffset="{offset:.1f}" '
         f'stroke-linecap="round" transform="rotate(-90 44 44)" />'
-        f'<text x="44" y="49" text-anchor="middle" fill="#FFFFFF" font-size="16" font-weight="700">{pct}%</text>'
+        f'<text x="44" y="49" text-anchor="middle" fill="#15171C" font-size="16" font-weight="700">{pct}%</text>'
         f'</svg></div>'
     )
 
-def render_mini_calendar(year: int, month: int, today_day: int, due_days: set[int]) -> str:
+def render_mini_calendar(year: int, month: int, today_day: int, due_days: dict[int, str]) -> str:
+    """due_days maps day-of-month -> busyness level (open/calm/steady/busy/peak)."""
     cal_matrix = pycal.monthcalendar(year, month)
     month_name = datetime(year, month, 1).strftime("%B %Y")
     parts = [
-        f'<div style="text-align:center; font-weight:700; font-size:0.85rem; color:#4A3B47; margin-bottom:6px;">{month_name}</div>',
+        f'<div style="text-align:center; font-weight:700; font-size:0.85rem; color:#15171C; margin-bottom:6px;">{month_name}</div>',
         '<table class="mini-cal"><tr><th>Mo</th><th>Tu</th><th>We</th><th>Th</th><th>Fr</th><th>Sa</th><th>Su</th></tr>',
     ]
     for week in cal_matrix:
@@ -366,7 +409,10 @@ def render_mini_calendar(year: int, month: int, today_day: int, due_days: set[in
             elif d == today_day:
                 parts.append(f'<td><span class="cal-today">{d}</span></td>')
             elif d in due_days:
-                parts.append(f'<td><span class="cal-due">{d}</span></td>')
+                lvl = due_days[d]
+                parts.append(
+                    f'<td><span class="cal-due" style="background:{bz.LEVEL_FILL[lvl]}; color:{bz.LEVEL_INK[lvl]};">{d}</span></td>'
+                )
             else:
                 parts.append(f"<td>{d}</td>")
         parts.append("</tr>")
@@ -403,7 +449,7 @@ def readable_text(hex_color: str) -> str:
     h = hex_color.lstrip("#")
     r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
     luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-    return "#3E313B" if luminance > 0.62 else "#FFFFFF"
+    return "#15171C" if luminance > 0.62 else "#FFFFFF"
 
 # ---------- Course Detection & Cleaning Helpers ----------
 CODE_RE = re.compile(r"^([A-Za-z]{2,5})[\s_-]?(\d{4}[A-Za-z]?)$")
@@ -558,9 +604,14 @@ def parse_ics_url(ics_url: str) -> list[dict]:
 
         clean_title = clean_canvas_title(raw_summary)
         lower = raw_summary.lower()
-        if any(w in lower for w in ["exam", "midterm", "final", "test", "quiz"]):
+        uid = str(event.get("UID", "")).lower()
+        if any(w in lower for w in ["exam", "midterm", "final", "test"]):
             item_type, diff = "exam", 5
-        elif any(w in lower for w in ["homework", "hw", "project", "lab", "assignment", "paper"]):
+        elif "quiz" in lower:
+            item_type, diff = "quiz", 4
+        elif "assignment" in uid or any(w in lower for w in ["homework", "hw", "project", "lab", "assignment", "paper"]):
+            # Canvas gives every assignment a UID like "event-assignment-123", even when the
+            # title has no keyword (e.g. "Hawkes Lesson 1.1"). Those are due items, not classes.
             item_type, diff = "assignment", 3
         else:
             item_type, diff = "recurring", 2
@@ -648,15 +699,15 @@ def stream_study_plan(df: pd.DataFrame, load_df: pd.DataFrame):
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
     today = pd.Timestamp.now().normalize()
     upcoming_items = df[(df["done"] == "no") & (df["date"] >= today) & (df["date"] <= today + pd.Timedelta(days=14))]
-    peak_days = load_df[(load_df["date"] >= today) & (load_df["date"] <= today + pd.Timedelta(days=14)) & (load_df["intensity"] >= 6.0)]
+    peak_days = load_df[(load_df["date"] >= today) & (load_df["date"] <= today + pd.Timedelta(days=14)) & (load_df["level"].isin(["busy", "peak"]))]
 
     items_summary = upcoming_items[["course", "date", "title", "type", "hours", "difficulty"]].to_dict(orient="records")
-    peaks_summary = peak_days[["date", "intensity"]].to_dict(orient="records")
+    peaks_summary = peak_days[["date", "level"]].to_dict(orient="records")
 
     prompt = f"""
     You are an academic coach for {display_name}. Today is {today.strftime('%Y-%m-%d')}.
     Daily capacity: {daily_capacity}h/day.
-    Peak days (0-10): {peaks_summary}
+    Busy and peak days: {peaks_summary}
     Tasks (next 14 days): {items_summary}
 
     Write a concise, bulleted 7-day study plan to flatten peak crunch days. Name exact courses, tasks, and realistic hour blocks within {daily_capacity}h/day. Keep it brief and scannable.
@@ -676,11 +727,11 @@ def stream_study_plan(df: pd.DataFrame, load_df: pd.DataFrame):
 # ---------- Left Taupe Sidebar Navigation & Importers ----------
 with st.sidebar:
     render_html(
-        f'<div style="font-size:1.35rem; font-weight:800; color:#4A3B47; letter-spacing:-0.5px; margin-bottom:4px;">'
-        f'Plan<span style="color:#8D7588;">tech</span></div>'
+        f'<div style="font-size:1.35rem; font-weight:800; color:#15171C; letter-spacing:-0.5px; margin-bottom:4px; font-family:var(--font-display);">'
+        f'Plan<span style="color:#686D7A;">tech</span></div>'
         f'<div class="profile-box"><div class="avatar-circle">{esc(initials)}</div>'
-        f'<div><div style="font-weight:700; color:#3E313B; font-size:0.95rem;">{esc(display_name)}</div>'
-        f'<div style="font-size:0.75rem; color:#7D6B78;">{esc(user.email)}</div></div></div>'
+        f'<div><div style="font-weight:700; color:#15171C; font-size:0.95rem;">{esc(display_name)}</div>'
+        f'<div style="font-size:0.75rem; color:#686D7A;">{esc(user.email)}</div></div></div>'
     )
 
     nav_page = st.radio(
@@ -738,15 +789,11 @@ with st.sidebar:
     with st.expander("Settings & Calibration"):
         updated_name = st.text_input("Display Name", value=display_name)
         new_cap = st.slider("Daily Study Capacity (hrs)", 2.0, 14.0, daily_capacity, 0.5)
-        new_exam_sp = st.slider("Exam Prep Spread (days)", 2, 14, exam_spread)
-        new_assign_sp = st.slider("Assignment Spread (days)", 1, 10, assign_spread)
         if st.button("Save Settings"):
             try:
                 save_profile_meta({
                     "full_name": updated_name.strip() or display_name,
                     "daily_capacity": new_cap,
-                    "exam_spread": new_exam_sp,
-                    "assign_spread": new_assign_sp,
                 })
                 st.rerun()
             except Exception as e:
@@ -768,7 +815,7 @@ today_local = pd.Timestamp(now_ny.date())
 
 top_left, top_right = st.columns([2.2, 1.5])
 with top_left:
-    render_html(f"<h1 style='margin-bottom:0; color:#3E313B; font-weight:800;'>{esc(get_greeting(display_name))}</h1>")
+    render_html(f"<h1 style='margin-bottom:0; color:#15171C; font-weight:800;'>{esc(get_greeting(display_name))}</h1>")
     if not df.empty:
         due_today = df[(df["done"] == "no") & (df["date"].dt.normalize() == today_local)]
         if due_today.empty:
@@ -837,32 +884,14 @@ chips_html = "".join(
 )
 render_html(f'<div class="chip-row">{chips_html}</div>')
 
-# ---------- Compute Workload & Completion Metrics ----------
-filtered_df["effort"] = filtered_df["hours"] * (0.5 + filtered_df["difficulty"] * 0.25)
-SPREAD_DAYS = {"exam": exam_spread, "assignment": assign_spread}
-daily_records = []
-
-for _, row in filtered_df.iterrows():
-    spread = SPREAD_DAYS.get(row["type"], 1)
-    weights = np.arange(1, spread + 1, dtype=float)
-    weights /= weights.sum()
-    for offset, w in enumerate(reversed(weights)):
-        day = row["date"] - pd.Timedelta(days=offset)
-        daily_records.append({
-            "date": day.normalize(),
-            "course": row["course"],
-            "load": row["effort"] * w,
-        })
-
-raw_daily = pd.DataFrame(daily_records)
-load_df = raw_daily.groupby("date", as_index=False)["load"].sum()
-full_range = pd.date_range(load_df["date"].min(), load_df["date"].max(), freq="D")
-load_df = load_df.set_index("date").reindex(full_range, fill_value=0.0).rename_axis("date").reset_index()
-
-max_reference_effort = daily_capacity * 1.5
-load_df["intensity"] = (load_df["load"] / max_reference_effort * 10).clip(0, 10).round(1)
-peak_threshold = min(round(load_df["intensity"].mean() + load_df["intensity"].std(), 1), 9.5)
-load_df["color"] = load_df["intensity"].apply(lambda v: "#D96B78" if v >= 6.5 else ("#E5A93B" if v >= 3.0 else "#5BB396"))
+# ---------- Compute Busyness & Completion Metrics ----------
+# Busyness = what's DUE each day (see busyness.py). No spreading, no hours or difficulty.
+range_start = min(filtered_df["date"].min(), today_local)
+range_end = max(filtered_df["date"].max(), today_local)
+daily_df = bz.daily_scores(filtered_df[["date", "course", "type"]], range_start, range_end)
+weekly_df = bz.weekly_scores(daily_df)
+course_daily_df = bz.course_daily_scores(filtered_df[["date", "course", "type"]])
+level_by_day = dict(zip(daily_df["date"], daily_df["level"]))
 
 total_items = len(filtered_df)
 done_items = int((filtered_df["done"] == "yes").sum())
@@ -874,8 +903,127 @@ for c_name in selected_courses:
     c_pct = round(((c_sub["done"] == "yes").sum() / len(c_sub)) * 100) if len(c_sub) else 0
     course_stats.append((c_name, c_pct))
 
+
+def short_label(row) -> str:
+    title = str(row["title"])
+    title = title if len(title) <= 22 else title[:21] + "…"
+    return f"{row['course']} {title}"
+
+
+def top_items(start, end, n=3) -> list[str]:
+    """The heaviest items due between start and end (inclusive), for labels and hovers."""
+    sub = filtered_df[(filtered_df["date"] >= start) & (filtered_df["date"] <= end)].copy()
+    if sub.empty:
+        return []
+    sub["w"] = sub["type"].map(lambda t: bz.TYPE_WEIGHTS.get(t, bz.DEFAULT_WEIGHT))
+    sub = sub[sub["w"] > 0].sort_values(["w", "date"], ascending=[False, True])
+    return [short_label(r) for _, r in sub.head(n).iterrows()]
+
+
+def fmt_range(a, b) -> str:
+    return f"{a.strftime('%b %-d')}–{b.strftime('%-d')}" if a.month == b.month else f"{a.strftime('%b %-d')}–{b.strftime('%b %-d')}"
+
+
+def semester_figure(view: str, height: int = 340) -> go.Figure:
+    """The hero graph: one line for the whole semester, dots colored by busyness level."""
+    if view == "Weeks":
+        data = weekly_df.rename(columns={"week_start": "x"}).copy()
+        data["label"] = [fmt_range(a, b) for a, b in zip(data["x"], data["week_end"])]
+        data["is_past"] = data["week_end"] < today_local
+        data["hover"] = [
+            f"<b>Week of {lbl}</b> · {lvl.capitalize()}<br>{cnt} due<br>" + "<br>".join(top_items(a, b))
+            for lbl, lvl, cnt, a, b in zip(data["label"], data["level"], data["count"], data["x"], data["week_end"])
+        ]
+        dot_size = 13
+    else:
+        data = daily_df.rename(columns={"date": "x"}).copy()
+        data["is_past"] = data["x"] < today_local
+        data["hover"] = [
+            f"<b>{x.strftime('%a %b %-d')}</b> · {lvl.capitalize()}<br>{cnt} due<br>" + "<br>".join(top_items(x, x))
+            for x, lvl, cnt in zip(data["x"], data["level"], data["count"])
+        ]
+        dot_size = 7
+
+    fig = go.Figure()
+    # Soft area + line. Past is faded, future is full strength.
+    for past, opacity in [(True, 0.45), (False, 1.0)]:
+        seg = data[data["is_past"] == past]
+        if past and not data[~data["is_past"]].empty:
+            seg = pd.concat([seg, data[~data["is_past"]].head(1)])  # connect the two segments
+        if seg.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=seg["x"], y=seg["score"], mode="lines",
+            line=dict(color="#15171C", width=2.5, shape="spline", smoothing=0.5),
+            fill="tozeroy", fillcolor="rgba(21,23,28,0.04)",
+            opacity=opacity, hoverinfo="skip", showlegend=False,
+        ))
+    dots = data[data["level"] != "open"]
+    fig.add_trace(go.Scatter(
+        x=dots["x"], y=dots["score"], mode="markers",
+        marker=dict(
+            size=dot_size,
+            color=[bz.LEVEL_FILL[l] for l in dots["level"]],
+            line=dict(width=1.5, color=[bz.LEVEL_INK[l] for l in dots["level"]]),
+            opacity=[0.45 if p else 1.0 for p in dots["is_past"]],
+        ),
+        hovertext=dots["hover"], hoverinfo="text", showlegend=False,
+    ))
+    # Peaks get labeled by their cause, so the hardest stretches explain themselves.
+    if view == "Weeks":
+        for _, r in data[data["level"] == "peak"].iterrows():
+            cause = top_items(r["x"], r["week_end"], 1)
+            if cause:
+                fig.add_annotation(
+                    x=r["x"], y=r["score"], text=cause[0], showarrow=False, yshift=18,
+                    font=dict(size=11, color=bz.LEVEL_INK["peak"], family=CHART_FONT),
+                    bgcolor="#fff0ec", borderpad=3,
+                )
+    # Today
+    fig.add_vline(x=today_local, line_dash="dash", line_color="#15171C", line_width=1.2)
+    fig.add_annotation(
+        x=today_local, y=1.02, yref="paper", text="TODAY", showarrow=False,
+        font=dict(size=10, color="#FFFFFF", family=CHART_FONT), bgcolor="#15171C", borderpad=3,
+    )
+    ymax = max(data["score"].max(), 1) * 1.28
+    fig.update_layout(
+        paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF",
+        height=height, margin=dict(l=4, r=4, t=24, b=8),
+        xaxis=dict(showgrid=False, showline=False, tickformat="%b", dtick="M1", ticklabelmode="period",
+                   tickfont=dict(color="#686D7A", size=12)),
+        yaxis=dict(visible=False, range=[0, ymax]),
+        hoverlabel=dict(bgcolor="#FFFFFF", bordercolor="#E6E3DD", font=dict(color="#15171C", family=CHART_FONT)),
+        font=dict(family=CHART_FONT),
+    )
+    return fig
+
+
 # ---------- Page Views ----------
 if nav_page == "Dashboard":
+    # 1. The hero: the whole semester as one line
+    hardest = weekly_df.loc[weekly_df["score"].idxmax()]
+    ahead = weekly_df[(weekly_df["week_start"] > today_local) & (weekly_df["level"].isin(["busy", "peak"]))]
+    sub_parts = [f"Hardest week: <b>{fmt_range(hardest['week_start'], hardest['week_end'])}</b>"]
+    if not ahead.empty:
+        nxt = ahead.iloc[0]
+        sub_parts.append(f"Next heavy week: <b>{fmt_range(nxt['week_start'], nxt['week_end'])}</b> ({nxt['level']})")
+    legend = "".join(
+        f'<span><i style="background:{bz.LEVEL_FILL[l]}; border:1px solid {bz.LEVEL_INK[l]};"></i>{l.capitalize()}</span>'
+        for l in bz.LEVELS
+    )
+    with st.container(key="hero"):
+        h_left, h_right = st.columns([4, 1.1])
+        with h_left:
+            render_html(
+                f'<div class="hero-title">Your semester</div>'
+                f'<div class="hero-sub">{" · ".join(sub_parts)}</div>'
+            )
+        with h_right:
+            view = st.segmented_control("Zoom", ["Weeks", "Days"], default="Weeks", label_visibility="collapsed", key="hero_zoom") or "Weeks"
+        st.plotly_chart(semester_figure(view), use_container_width=True, config={"displayModeBar": False})
+        render_html(f'<div class="legend" style="padding:0 0 10px 2px;">{legend}</div>')
+
+    # 2. The detail, one level down
     main_area, right_rail = st.columns([3.3, 1.0])
 
     with main_area:
@@ -912,8 +1060,12 @@ if nav_page == "Dashboard":
         month_due = filtered_df[
             (filtered_df["date"].dt.year == now_ny.year) & (filtered_df["date"].dt.month == now_ny.month)
         ]
-        due_day_nums = set(month_due["date"].dt.day.tolist())
-        cal_html = render_mini_calendar(now_ny.year, now_ny.month, now_ny.day, due_day_nums)
+        due_day_levels = {
+            d.day: level_by_day.get(d.normalize(), "calm")
+            for d in month_due["date"]
+            if level_by_day.get(d.normalize(), "open") != "open"
+        }
+        cal_html = render_mini_calendar(now_ny.year, now_ny.month, now_ny.day, due_day_levels)
 
         next_three = filtered_df[filtered_df["date"] >= today_local].sort_values("date").head(3)
         if next_three.empty:
@@ -930,71 +1082,38 @@ if nav_page == "Dashboard":
             f'<div>{cal_html}</div><div>{sched_pills}</div></div></div>'
         )
 
-        render_html('<div class="bento-card" style="padding-bottom:10px;"><div class="bento-title" style="margin-bottom:0;">Workload Intensity Forecast (0 = Free, 10 = Heavy Crunch)</div></div>')
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=load_df["date"],
-            y=load_df["intensity"],
-            mode="lines+markers",
-            line=dict(color="#8D7588", width=3, shape="spline", smoothing=0.4),
-            fill="tozeroy",
-            fillcolor="rgba(141, 117, 136, 0.16)",
-            marker=dict(color=load_df["color"], size=7, line=dict(width=1, color="white")),
-            hovertemplate="<b>%{x|%b %d}</b> • Intensity: <b>%{y}/10</b><extra></extra>",
-        ))
-        fig.add_hline(y=peak_threshold, line_dash="dash", line_color="#D96B78")
-        fig.update_layout(
-            paper_bgcolor="#EBE4E6",
-            plot_bgcolor="#F7F3EE",
-            yaxis=dict(range=[-0.4, 10.5], tickvals=[0, 5, 10], ticktext=["0 (Free)", "5", "10 (Max)"], gridcolor="#DFD6D8"),
-            xaxis=dict(showgrid=False),
-            height=230,
-            margin=dict(l=14, r=14, t=14, b=14),
-        )
-        st.plotly_chart(fig, use_container_width=True)
 
     with right_rail:
-        rings_html = render_progress_ring("Overall Coursework", overall_pct, "#EB7A88")
+        rings_html = render_progress_ring("Overall Coursework", overall_pct, "#15171C")
         for c_name, c_pct in course_stats:
             rings_html += render_progress_ring(c_name, c_pct, course_color(c_name))
 
         render_html(
             f'<div class="plum-panel">{rings_html}'
-            f'<div style="text-align:center; font-size:0.82rem; font-weight:600; color:#F5EFF3; padding-top:4px;">'
+            f'<div style="text-align:center; font-size:0.82rem; font-weight:600; color:#464B57; padding-top:4px;">'
             f'{done_items} of {total_items} tasks done</div></div>'
         )
 
 elif nav_page == "Workload Forecast":
-    st.subheader("Semester Workload Forecast")
-    chart_mode = st.radio("View Mode", ["Total Intensity Line", "Stacked by Course"], horizontal=True)
-    with st.expander(f"Workload Scale Guide (0–10, calibrated to {daily_capacity}h/day)"):
-        st.markdown("- **0–2.9 (Green):** Free / Light\n- **3.0–6.4 (Yellow):** Moderate\n- **6.5–10.0 (Red):** Heavy Crunch")
+    st.subheader("Semester Busyness")
+    chart_mode = st.radio("View Mode", ["Weeks", "Days", "Stacked by Course"], horizontal=True)
+    with st.expander("How busyness is scored"):
+        st.markdown(
+            "Each item counts on its **due date**: exam 4, quiz 3, assignment 2, reading or job 1. "
+            "Class meetings count 0. Many items from one class on one day count as one heavy day.\n\n"
+            "- **Daily:** open 0 · calm under 4 · steady 4–6.5 · busy 7–9.5 · peak 10+\n"
+            "- **Weekly:** calm under 10 · steady 10–14.5 · busy 15–20.5 · peak 21+"
+        )
 
-    if chart_mode == "Total Intensity Line":
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=load_df["date"], y=load_df["intensity"], mode="lines+markers",
-            line=dict(color="#8D7588", width=3, shape="spline", smoothing=0.4),
-            fill="tozeroy", fillcolor="rgba(141, 117, 136, 0.16)",
-            marker=dict(color=load_df["color"], size=8, line=dict(width=1, color="white")),
-            hovertemplate="<b>%{x|%b %d, %Y}</b><br>Intensity: <b>%{y}/10</b><extra></extra>",
-        ))
-        fig.add_hline(y=peak_threshold, line_dash="dash", line_color="#D96B78", annotation_text=f"Peak ({peak_threshold}/10)")
-        fig.update_layout(
-            paper_bgcolor="#EBE4E6", plot_bgcolor="#F7F3EE",
-            xaxis=dict(rangeslider=dict(visible=True), type="date"),
-            yaxis=dict(title="Workload Intensity (0–10)", range=[-0.4, 10.6], tickvals=[0, 2.5, 5, 7.5, 10], ticktext=["0 (Free)", "2.5", "5 (Moderate)", "7.5", "10 (Max)"]),
-            height=430,
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    if chart_mode in ("Weeks", "Days"):
+        st.plotly_chart(semester_figure(chart_mode, height=440), use_container_width=True, config={"displayModeBar": False})
     else:
-        course_daily = raw_daily.groupby(["date", "course"], as_index=False)["load"].sum()
-        course_daily["intensity"] = (course_daily["load"] / max_reference_effort * 10).clip(0, 10).round(2)
         fig_stack = px.area(
-            course_daily, x="date", y="intensity", color="course",
-            color_discrete_map={c: course_color(c) for c in course_daily["course"].unique()},
+            course_daily_df, x="date", y="score", color="course",
+            color_discrete_map={c: course_color(c) for c in course_daily_df["course"].unique()},
         )
-        fig_stack.update_layout(paper_bgcolor="#EBE4E6", plot_bgcolor="#F7F3EE", yaxis=dict(range=[0, 10.6]), height=430)
+        fig_stack.update_layout(paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF", height=440,
+                                yaxis=dict(title="Busyness score"), font=dict(family=CHART_FONT))
         st.plotly_chart(fig_stack, use_container_width=True)
 
 elif nav_page == "Full Calendar":
@@ -1164,7 +1283,7 @@ elif nav_page == "AI Study Coach":
     st.write(f"Generates a streaming 7-day plan calibrated to your **{daily_capacity}h/day** study capacity.")
     if st.button("Generate My 7-Day Study Plan", type="primary"):
         try:
-            plan_text = st.write_stream(stream_study_plan(filtered_df, load_df))
+            plan_text = st.write_stream(stream_study_plan(filtered_df, daily_df))
             st.session_state["cached_study_plan"] = plan_text
         except Exception as e:
             st.error(f"Could not generate study plan: {e}")
