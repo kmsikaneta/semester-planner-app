@@ -215,7 +215,8 @@ def parse_syllabus_multimodal(uploaded_file=None, pasted_text: str = "", default
     if pasted_text.strip():
         contents.append(pasted_text.strip()[:18000])
 
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=contents)
+    # Inside parse_syllabus_multimodal:
+response = client.models.generate_content(model="gemini-3.8-flash", contents=contents)
     raw = response.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(raw)
 
@@ -236,7 +237,8 @@ def generate_study_plan(df: pd.DataFrame, load_df: pd.DataFrame) -> str:
     Create a concise, actionable day-by-day study plan for the next 7 days to flatten their peak crunch days.
     Group recommendations by day, name exact courses and assignments, and suggest realistic hour blocks.
     """
-    res = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+    # Inside generate_study_plan:
+    res = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
     return res.text
 
 # ---------- Sidebar Controls ----------
