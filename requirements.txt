@@ -10,3 +10,4 @@ Pillow
 google-genai
 supabase
 streamlit-calendar
+streamlit>=1.50
