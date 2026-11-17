@@ -326,6 +326,21 @@ def render_mini_calendar(year: int, month: int, today_day: int, due_days: set[in
     parts.append("</table>")
     return "".join(parts)
 
+# ---------- Course Detection & Cleaning Helpers ----------
+def detect_course_code(text: str) -> str:
+    if not text:
+        return "General"
+    match = re.search(r"(?<![A-Za-z])([A-Za-z]{2,5})[\s_-]?(\d{3,4}[A-Za-z]?)(?![0-9])", text)
+    if match:
+        dept = match.group(1).upper()
+        if dept not in {"QUIZ", "EXAM", "TEST", "LAB", "HW", "PART", "WEEK", "UNIT", "MOD", "CH", "PAGE"}:
+            return f"{dept} {match.group(2).upper()}"
+    return "General"
+
+def clean_canvas_title(raw_summary: str) -> str:
+    cleaned = re.sub(r"\[[^\]]*[A-Za-z]{2,5}[\s_-]?\d{3,4}[^\]]*\]", "", raw_summary).strip()
+    return cleaned if cleaned else raw_summary.strip()
+
 # ---------- Database & AI Helpers ----------
 def load_user_df() -> pd.DataFrame:
     res = supabase.table("items").select("*").eq("user_id", user_id).execute()
@@ -372,23 +387,6 @@ def add_rows_dedup(new_rows: list[dict]) -> int:
         supabase.table("items").insert(unique_rows).execute()
     return len(unique_rows)
 
-def detect_course_code(text: str) -> str:
-    if not text:
-        return "General"
-    # Matches patterns like MATH-2167, ITSC 3155, 202680-MATH-2167-001, CHEM1251L
-    match = re.search(r"(?<![A-Za-z])([A-Za-z]{2,5})[\s_-]?(\d{3,4}[A-Za-z]?)(?![0-9])", text)
-    if match:
-        dept = match.group(1).upper()
-        # Ignore common non-course words that precede numbers (e.g., Quiz 3, Exam 2, Lab 1, Test 3)
-        if dept not in {"QUIZ", "EXAM", "TEST", "LAB", "HW", "PART", "WEEK", "UNIT", "MOD", "CH", "PAGE"}:
-            return f"{dept} {match.group(2).upper()}"
-    return "General"
-
-def clean_canvas_title(raw_summary: str) -> str:
-    # Removes trailing/embedded Canvas bracket tags like [202680-MATH-2167-001-13789] for cleaner display
-    cleaned = re.sub(r"\[[^\]]*[A-Za-z]{2,5}[\s_-]?\d{3,4}[^\]]*\]", "", raw_summary).strip()
-    return cleaned if cleaned else raw_summary.strip()
-
 def parse_ics_url(ics_url: str) -> list[dict]:
     resp = requests.get(ics_url.strip(), timeout=15)
     resp.raise_for_status()
@@ -408,7 +406,6 @@ def parse_ics_url(ics_url: str) -> list[dict]:
         dtend = event.get("DTEND").dt if event.get("DTEND") else dtstart
         duration_hrs = round(max((dtend - dtstart).total_seconds() / 3600, 0.5), 2) if hasattr(dtstart, "hour") else 2.0
 
-        # Check summary first, then Canvas description/categories for the course code
         course = detect_course_code(raw_summary)
         if course == "General":
             course = detect_course_code(raw_desc)
@@ -560,6 +557,7 @@ with st.sidebar:
                 st.rerun()
             except Exception as e:
                 st.error(f"Sync failed: {e}")
+
         if st.button("Auto-Tag Existing 'General' Items"):
             existing_gen = supabase.table("items").select("*").eq("user_id", user_id).eq("course", "General").execute().data
             updated = 0
@@ -569,10 +567,11 @@ with st.sidebar:
                     supabase.table("items").update({
                         "course": detected,
                         "title": clean_canvas_title(item["title"]),
-                 }).eq("id", item["id"]).execute()
-                updated += 1
-        st.success(f"Organized {updated} items into their courses!")
-        st.rerun()
+                    }).eq("id", item["id"]).execute()
+                    updated += 1
+            st.success(f"Organized {updated} items into their courses!")
+            st.rerun()
+
     with st.expander("AI Syllabus Extractor"):
         course_tag = st.text_input("Course Tag (optional)", placeholder="e.g., ITSC 3155")
         syl_file = st.file_uploader("PDF, Word (.docx), or Image", type=["pdf", "docx", "png", "jpg", "jpeg"])
