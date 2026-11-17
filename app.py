@@ -1,4 +1,5 @@
 import calendar as pycal
+import html as html_lib
 import json
 import re
 from datetime import datetime, timedelta
@@ -26,8 +27,15 @@ MODEL_ID = "gemini-3.8-flash"
 # Initialize Supabase client
 supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
+def esc(text) -> str:
+    return html_lib.escape(str(text)).replace("\n", " ").replace("\r", " ")
+
+def render_html(raw_html: str):
+    single_line = " ".join(line.strip() for line in raw_html.splitlines() if line.strip())
+    st.markdown(single_line, unsafe_allow_html=True)
+
 # ---------- Custom Bento Aesthetic CSS ----------
-st.markdown("""
+render_html("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
@@ -35,19 +43,16 @@ html, body, [class*="css"] {
     font-family: 'Plus Jakarta Sans', sans-serif;
 }
 
-/* Warm Cream Main Background */
 .stApp {
     background-color: #F7F3EE;
     color: #3E313B;
 }
 
-/* Soft Taupe Sidebar */
 section[data-testid="stSidebar"] {
     background-color: #E6E0DE;
     border-right: 1px solid #D8CFD1;
 }
 
-/* Rounded Pill Inputs & Buttons */
 div[data-testid="stTextInput"] input {
     border-radius: 999px !important;
     background-color: #EDE7E5 !important;
@@ -61,7 +66,6 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     font-weight: 600 !important;
 }
 
-/* Bento Cards */
 .bento-card {
     background-color: #EBE4E6;
     border-radius: 22px;
@@ -76,7 +80,6 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     margin-bottom: 12px;
 }
 
-/* Inner Pill Row inside Bento Cards */
 .pill-row {
     background-color: #F7F3EE;
     border-radius: 999px;
@@ -85,6 +88,7 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
     font-size: 0.88rem;
     color: #3E313B;
 }
@@ -93,6 +97,7 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     align-items: center;
     gap: 10px;
     overflow: hidden;
+    min-width: 0;
 }
 .pill-badge {
     background-color: #EBE4E6;
@@ -115,7 +120,6 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     white-space: nowrap;
 }
 
-/* Date Circle Badge (like My Schedule in reference) */
 .date-circle {
     min-width: 34px;
     height: 34px;
@@ -130,7 +134,6 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     box-shadow: 0 1px 4px rgba(0,0,0,0.06);
 }
 
-/* Right Plum Progress Rail */
 .plum-panel {
     background-color: #8D7588;
     border-radius: 26px;
@@ -151,7 +154,6 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     margin-bottom: 8px;
 }
 
-/* Sidebar User Avatar Header */
 .profile-box {
     display: flex;
     align-items: center;
@@ -171,7 +173,6 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     justify-content: center;
 }
 
-/* Mini Calendar Table */
 .mini-cal {
     width: 100%;
     border-collapse: collapse;
@@ -210,7 +211,7 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     line-height: 20px;
 }
 </style>
-""", unsafe_allow_html=True)
+""")
 
 # ---------- Authentication Gate ----------
 if "user" not in st.session_state:
@@ -291,41 +292,39 @@ def render_progress_ring(label: str, pct: int, stroke_color: str) -> str:
     radius = 34
     circumference = 2 * 3.14159 * radius
     offset = circumference * (1 - pct / 100.0)
-    return f"""
-    <div class="plum-subcard">
-        <div class="plum-label">{label}</div>
-        <svg width="88" height="88" viewBox="0 0 88 88">
-            <circle cx="44" cy="44" r="{radius}" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="7" />
-            <circle cx="44" cy="44" r="{radius}" fill="none" stroke="{stroke_color}" stroke-width="7"
-                    stroke-dasharray="{circumference:.1f}" stroke-dashoffset="{offset:.1f}"
-                    stroke-linecap="round" transform="rotate(-90 44 44)" />
-            <text x="44" y="49" text-anchor="middle" fill="#FFFFFF" font-size="16" font-weight="700">{pct}%</text>
-        </svg>
-    </div>
-    """
+    return (
+        f'<div class="plum-subcard">'
+        f'<div class="plum-label">{esc(label)}</div>'
+        f'<svg width="88" height="88" viewBox="0 0 88 88">'
+        f'<circle cx="44" cy="44" r="{radius}" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="7" />'
+        f'<circle cx="44" cy="44" r="{radius}" fill="none" stroke="{stroke_color}" stroke-width="7" '
+        f'stroke-dasharray="{circumference:.1f}" stroke-dashoffset="{offset:.1f}" '
+        f'stroke-linecap="round" transform="rotate(-90 44 44)" />'
+        f'<text x="44" y="49" text-anchor="middle" fill="#FFFFFF" font-size="16" font-weight="700">{pct}%</text>'
+        f'</svg></div>'
+    )
 
 def render_mini_calendar(year: int, month: int, today_day: int, due_days: set[int]) -> str:
     cal_matrix = pycal.monthcalendar(year, month)
     month_name = datetime(year, month, 1).strftime("%B %Y")
-    html = f"""
-    <div style="text-align:center; font-weight:700; font-size:0.85rem; color:#4A3B47; margin-bottom:6px;">{month_name}</div>
-    <table class="mini-cal">
-        <tr><th>Mo</th><th>Tu</th><th>We</th><th>Th</th><th>Fr</th><th>Sa</th><th>Su</th></tr>
-    """
+    parts = [
+        f'<div style="text-align:center; font-weight:700; font-size:0.85rem; color:#4A3B47; margin-bottom:6px;">{month_name}</div>',
+        '<table class="mini-cal"><tr><th>Mo</th><th>Tu</th><th>We</th><th>Th</th><th>Fr</th><th>Sa</th><th>Su</th></tr>',
+    ]
     for week in cal_matrix:
-        html += "<tr>"
+        parts.append("<tr>")
         for d in week:
             if d == 0:
-                html += "<td></td>"
+                parts.append("<td></td>")
             elif d == today_day:
-                html += f'<td><span class="cal-today">{d}</span></td>'
+                parts.append(f'<td><span class="cal-today">{d}</span></td>')
             elif d in due_days:
-                html += f'<td><span class="cal-due">{d}</span></td>'
+                parts.append(f'<td><span class="cal-due">{d}</span></td>')
             else:
-                html += f"<td>{d}</td>"
-        html += "</tr>"
-    html += "</table>"
-    return html
+                parts.append(f"<td>{d}</td>")
+        parts.append("</tr>")
+    parts.append("</table>")
+    return "".join(parts)
 
 # ---------- Database & AI Helpers ----------
 def load_user_df() -> pd.DataFrame:
@@ -512,18 +511,13 @@ def stream_study_plan(df: pd.DataFrame, load_df: pd.DataFrame):
 
 # ---------- Left Taupe Sidebar Navigation & Importers ----------
 with st.sidebar:
-    st.markdown(f"""
-    <div style="font-size:1.35rem; font-weight:800; color:#4A3B47; letter-spacing:-0.5px; margin-bottom:4px;">
-        Plan<span style="color:#8D7588;">tech</span>
-    </div>
-    <div class="profile-box">
-        <div class="avatar-circle">{initials}</div>
-        <div>
-            <div style="font-weight:700; color:#3E313B; font-size:0.95rem;">{display_name}</div>
-            <div style="font-size:0.75rem; color:#7D6B78;">{user.email}</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    render_html(
+        f'<div style="font-size:1.35rem; font-weight:800; color:#4A3B47; letter-spacing:-0.5px; margin-bottom:4px;">'
+        f'Plan<span style="color:#8D7588;">tech</span></div>'
+        f'<div class="profile-box"><div class="avatar-circle">{esc(initials)}</div>'
+        f'<div><div style="font-weight:700; color:#3E313B; font-size:0.95rem;">{esc(display_name)}</div>'
+        f'<div style="font-size:0.75rem; color:#7D6B78;">{esc(user.email)}</div></div></div>'
+    )
 
     nav_page = st.radio(
         "Navigation",
@@ -608,7 +602,7 @@ today_local = pd.Timestamp(now_ny.date())
 
 top_left, top_right = st.columns([2.2, 1.5])
 with top_left:
-    st.markdown(f"<h1 style='margin-bottom:0; color:#3E313B; font-weight:800;'>{get_greeting(display_name)}</h1>", unsafe_allow_html=True)
+    render_html(f"<h1 style='margin-bottom:0; color:#3E313B; font-weight:800;'>{esc(get_greeting(display_name))}</h1>")
     if not df.empty:
         due_today = df[(df["done"] == "no") & (df["date"].dt.normalize() == today_local)]
         if due_today.empty:
@@ -683,7 +677,6 @@ load_df["intensity"] = (load_df["load"] / max_reference_effort * 10).clip(0, 10)
 peak_threshold = min(round(load_df["intensity"].mean() + load_df["intensity"].std(), 1), 9.5)
 load_df["color"] = load_df["intensity"].apply(lambda v: "#D96B78" if v >= 6.5 else ("#E5A93B" if v >= 3.0 else "#5BB396"))
 
-# Calculate Course Completion Percentages for the Right Plum Progress Rail
 total_items = len(filtered_df)
 done_items = int((filtered_df["done"] == "yes").sum())
 overall_pct = round((done_items / total_items) * 100) if total_items else 0
@@ -699,7 +692,6 @@ if nav_page == "Dashboard":
     main_area, right_rail = st.columns([3.3, 1.0])
 
     with main_area:
-        # Row 1: Two Bento Cards (Needs Attention + Upcoming Deadlines)
         b1, b2 = st.columns(2)
 
         with b1:
@@ -707,44 +699,29 @@ if nav_page == "Dashboard":
                 (filtered_df["done"] == "no") & (filtered_df["date"] >= today_local)
             ].sort_values(["difficulty", "date"], ascending=[False, True]).head(3)
 
-            rows_html = ""
             if urgent.empty:
                 rows_html = '<div class="pill-row"><span class="pill-sub">All caught up on urgent tasks!</span></div>'
             else:
-                for _, r in urgent.iterrows():
-                    rows_html += f"""
-                    <div class="pill-row">
-                        <div class="pill-left">
-                            <span class="pill-badge">{r['course']}</span>
-                            <span class="pill-title">{r['title']}</span>
-                        </div>
-                        <span class="pill-sub">Diff {r['difficulty']}/5</span>
-                    </div>
-                    """
-            st.markdown(f'<div class="bento-card"><div class="bento-title">Priority Focus</div>{rows_html}</div>', unsafe_allow_html=True)
+                rows_html = "".join(
+                    f'<div class="pill-row"><div class="pill-left"><span class="pill-badge">{esc(r["course"])}</span><span class="pill-title">{esc(r["title"])}</span></div><span class="pill-sub">Diff {int(r["difficulty"])}/5</span></div>'
+                    for _, r in urgent.iterrows()
+                )
+            render_html(f'<div class="bento-card"><div class="bento-title">Priority Focus</div>{rows_html}</div>')
 
         with b2:
             upcoming = filtered_df[
                 (filtered_df["done"] == "no") & (filtered_df["date"] >= today_local)
             ].sort_values("date").head(3)
 
-            up_html = ""
             if upcoming.empty:
                 up_html = '<div class="pill-row"><span class="pill-sub">No upcoming deadlines scheduled.</span></div>'
             else:
-                for _, r in upcoming.iterrows():
-                    up_html += f"""
-                    <div class="pill-row">
-                        <div class="pill-left">
-                            <span class="pill-badge">{r['date'].strftime('%b %d')}</span>
-                            <span class="pill-title">{r['title']}</span>
-                        </div>
-                        <span class="pill-sub">{r['hours']}h</span>
-                    </div>
-                    """
-            st.markdown(f'<div class="bento-card"><div class="bento-title">Upcoming Events</div>{up_html}</div>', unsafe_allow_html=True)
+                up_html = "".join(
+                    f'<div class="pill-row"><div class="pill-left"><span class="pill-badge">{r["date"].strftime("%b %d")}</span><span class="pill-title">{esc(r["title"])}</span></div><span class="pill-sub">{r["hours"]}h</span></div>'
+                    for _, r in upcoming.iterrows()
+                )
+            render_html(f'<div class="bento-card"><div class="bento-title">Upcoming Events</div>{up_html}</div>')
 
-        # Row 2: My Schedule Bento Card (Mini Calendar Grid + Numbered Day Pills, matching reference)
         month_due = filtered_df[
             (filtered_df["date"].dt.year == now_ny.year) & (filtered_df["date"].dt.month == now_ny.month)
         ]
@@ -752,36 +729,21 @@ if nav_page == "Dashboard":
         cal_html = render_mini_calendar(now_ny.year, now_ny.month, now_ny.day, due_day_nums)
 
         next_three = filtered_df[filtered_df["date"] >= today_local].sort_values("date").head(3)
-        sched_pills = ""
         if next_three.empty:
             sched_pills = '<div class="pill-row"><span class="pill-sub">No events left this week.</span></div>'
         else:
-            for _, r in next_three.iterrows():
-                sched_pills += f"""
-                <div class="pill-row">
-                    <div class="pill-left">
-                        <div class="date-circle">{r['date'].day}</div>
-                        <div>
-                            <div class="pill-title">{r['title']}</div>
-                            <div class="pill-sub">{r['course']} • {r['type'].capitalize()}</div>
-                        </div>
-                    </div>
-                    <span class="pill-sub">{r['hours']}h</span>
-                </div>
-                """
+            sched_pills = "".join(
+                f'<div class="pill-row"><div class="pill-left"><div class="date-circle">{r["date"].day}</div><div><div class="pill-title">{esc(r["title"])}</div><div class="pill-sub">{esc(r["course"])} • {esc(r["type"]).capitalize()}</div></div></div><span class="pill-sub">{r["hours"]}h</span></div>'
+                for _, r in next_three.iterrows()
+            )
 
-        st.markdown(f"""
-        <div class="bento-card">
-            <div class="bento-title">My Schedule</div>
-            <div style="display:grid; grid-template-columns: 1.05fr 1.35fr; gap:16px; align-items:center;">
-                <div>{cal_html}</div>
-                <div>{sched_pills}</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        render_html(
+            f'<div class="bento-card"><div class="bento-title">My Schedule</div>'
+            f'<div style="display:grid; grid-template-columns: 1.05fr 1.35fr; gap:16px; align-items:center;">'
+            f'<div>{cal_html}</div><div>{sched_pills}</div></div></div>'
+        )
 
-        # Row 3: Compact Workload Intensity Curve Bento Card
-        st.markdown('<div class="bento-card"><div class="bento-title">Workload Intensity Forecast (0 = Free, 10 = Heavy Crunch)</div>', unsafe_allow_html=True)
+        render_html('<div class="bento-card" style="padding-bottom:10px;"><div class="bento-title" style="margin-bottom:0;">Workload Intensity Forecast (0 = Free, 10 = Heavy Crunch)</div></div>')
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=load_df["date"],
@@ -795,31 +757,26 @@ if nav_page == "Dashboard":
         ))
         fig.add_hline(y=peak_threshold, line_dash="dash", line_color="#D96B78")
         fig.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="#EBE4E6",
+            plot_bgcolor="#F7F3EE",
             yaxis=dict(range=[-0.4, 10.5], tickvals=[0, 5, 10], ticktext=["0 (Free)", "5", "10 (Max)"], gridcolor="#DFD6D8"),
             xaxis=dict(showgrid=False),
-            height=220,
-            margin=dict(l=10, r=10, t=10, b=10),
+            height=230,
+            margin=dict(l=14, r=14, t=14, b=14),
         )
         st.plotly_chart(fig, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
 
-    # Right-Hand Plum Progress Panel with Circular Completion Rings
     with right_rail:
         ring_colors = ["#EB7A88", "#65C3BA", "#F0B95B", "#9CC5E9"]
         rings_html = render_progress_ring("Overall Coursework", overall_pct, ring_colors[0])
         for idx, (c_name, c_pct) in enumerate(course_stats[:3]):
             rings_html += render_progress_ring(c_name, c_pct, ring_colors[(idx + 1) % len(ring_colors)])
 
-        st.markdown(f"""
-        <div class="plum-panel">
-            {rings_html}
-            <div style="text-align:center; font-size:0.82rem; font-weight:600; color:#F5EFF3; padding-top:4px;">
-                {done_items} of {total_items} tasks done
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        render_html(
+            f'<div class="plum-panel">{rings_html}'
+            f'<div style="text-align:center; font-size:0.82rem; font-weight:600; color:#F5EFF3; padding-top:4px;">'
+            f'{done_items} of {total_items} tasks done</div></div>'
+        )
 
 elif nav_page == "Workload Forecast":
     st.subheader("Semester Workload Forecast")
