@@ -1,25 +1,35 @@
-# Semester Planner
+# Semester Planner (working name: Plantech)
 
-A web app that turns a whole semester (classes, assignments, exams, work, gym) into a daily workload graph, so students can see their heaviest weeks before they arrive.
+See your whole semester as one line. The app turns a Canvas calendar feed and your syllabi into a busyness graph, so the hard weeks are visible before they arrive.
 
-## What it does
-- Scores how busy each day is from what's due that day
-- Five busyness levels (open, calm, steady, busy, peak), green to soft coral
-- The whole semester as one graph at the top of the dashboard, by week or by day, with peaks labeled by their cause
-- Morning brief: this week's load, next peak day, today's items, and items needing attention
+## Before you edit (read this, Kaya and Sunny)
+1. **Pull first, every time:** `git pull` (or open the file fresh on GitHub) right before you change anything. Editing an old copy of `app.py` and pushing it erases whatever was merged since.
+2. **Work on a branch and open a PR.** Don't push straight to `main`; `main` is what the live app runs.
+3. Design lives in `styles.css` and `weather.py`; busyness math lives in `busyness.py`; `app.py` is data, auth, AI and pages.
 
-## Built with
-Python, pandas, Plotly, Streamlit
-
-## How to run
-    pip install pandas plotly streamlit numpy
-    streamlit run app.py
+## Pages
+- **Home:** the semester graph (hero), this week's strip, and Today's brief with check-offs
+- **Semester:** the graph by week, by day, or by class, plus the heaviest weeks
+- **Calendar:** month view; only busy and stormy days get color
+- **Tasks:** everything due, grouped by day, with check-offs and a table mode for bulk edits
+- **Classes:** progress per class, syllabus totals, colors, rename, delete
+- **Study coach:** AI 7-day plan (runs in the background)
+- **Add & sync:** Canvas calendar link, syllabus reader, quick add, one item
+- **Settings**
 
 ## How busyness works
-See `busyness.py`. Each item counts on its due date: exam 4, quiz 3, assignment 2, reading or job 1, class meetings 0. Many items from one class on one day count as one heavy day (first item full, +0.5 per extra, capped at +4). Daily levels: open 0, calm under 4, steady 4 to 6.5, busy 7 to 9.5, peak 10+. Weekly: calm under 10, steady 10 to 14.5, busy 15 to 20.5, peak 21+. Starting values; tune on real semesters.
+See `busyness.py`. Each item counts on its due date: exam 4, quiz 3, assignment 2, reading or event 1, class meetings 0. Many items from one class on one day count as one heavy day (first item full, +0.5 per extra, capped at +4).
 
-## Roadmap
-- Add-item form
-- Mark items done
-- Color-coded calendar view
-- Syllabus upload to pull due dates automatically
+## The weather world
+Every busyness level is weather: open = Clear, calm = Fair, steady = Overcast, busy = Rain, peak = Storm (`weather.py`). Icons appear next to busyness labels, and Today's brief sits under that day's sky. Drop the Higgsfield art into `assets/skies/` as `clear.png`, `fair.png`, `overcast.png`, `rain.png`, `storm.png` and the brief uses it automatically; until then a code-drawn version of the same hills stands in.
+
+## Run it
+    pip install -r requirements.txt
+    streamlit run app.py            # needs .streamlit/secrets.toml (Supabase + Gemini)
+
+Preview with no keys, on sample data (changes reset when you stop it):
+
+    streamlit run dev/preview.py
+    PREVIEW_DATA=my_items.csv streamlit run dev/preview.py
+
+Built with Python, pandas, Plotly, Streamlit, Supabase and Gemini.

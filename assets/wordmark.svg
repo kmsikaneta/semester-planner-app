@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="168" height="32" viewBox="0 0 168 32">
+  <g fill="none" stroke="#15171C" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 24 C 8 22, 10 12, 14 13 S 19 22, 22 18 S 26 6, 30 8"/>
+  </g>
+  <circle cx="30" cy="8" r="3.4" fill="#15171C"/>
+  <text x="40" y="22.5" font-family="Bricolage Grotesque, Plus Jakarta Sans, system-ui, sans-serif" font-size="19" font-weight="800" letter-spacing="-0.4" fill="#15171C">Plantech</text>
+</svg>
