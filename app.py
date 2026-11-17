@@ -132,6 +132,7 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     align-items: center;
     justify-content: center;
     box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    box-sizing: border-box;
 }
 
 .plum-panel {
@@ -210,6 +211,28 @@ button[kind="primary"], button[kind="secondary"], div[data-testid="stFormSubmitB
     height: 22px;
     line-height: 20px;
 }
+
+.course-chip {
+    display: inline-block;
+    font-size: 0.78rem;
+    font-weight: 700;
+    padding: 5px 13px;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+.chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 4px 0 16px 0;
+}
+.course-dot {
+    width: 10px;
+    height: 10px;
+    min-width: 10px;
+    border-radius: 50%;
+    display: inline-block;
+}
 </style>
 """)
 
@@ -276,6 +299,30 @@ daily_capacity = float(meta.get("daily_capacity", 6.0))
 exam_spread = int(meta.get("exam_spread", 7))
 assign_spread = int(meta.get("assign_spread", 4))
 
+# Per-course settings: {"MATH 2171": {"difficulty": 4, "custom": False, "color": "#D96B78"}}
+course_prefs = meta.get("course_prefs") or {}
+if not isinstance(course_prefs, dict):
+    course_prefs = {}
+
+APP_META_KEYS = ["full_name", "daily_capacity", "exam_spread", "assign_spread", "course_prefs"]
+
+def save_profile_meta(updates: dict):
+    """Save profile settings, always sending every app setting so none get lost."""
+    current = {k: meta.get(k) for k in APP_META_KEYS if meta.get(k) is not None}
+    current.update(updates)
+    res = supabase.auth.update_user({"data": current})
+    st.session_state["user"] = res.user
+
+def flash(message: str, kind: str = "success"):
+    """Queue a message that survives the next rerun."""
+    st.session_state["flash"] = (kind, message)
+
+def show_flash():
+    item = st.session_state.pop("flash", None)
+    if item:
+        kind, message = item
+        getattr(st, kind, st.info)(message)
+
 def get_greeting(name: str) -> str:
     now_local = datetime.now(ZoneInfo("America/New_York"))
     hour = now_local.hour
@@ -326,19 +373,81 @@ def render_mini_calendar(year: int, month: int, today_day: int, due_days: set[in
     parts.append("</table>")
     return "".join(parts)
 
+# ---------- Color Helpers (course difficulty: green = easy, red = hard) ----------
+EASY_RGB = (91, 179, 150)    # #5BB396
+MID_RGB = (229, 169, 59)     # #E5A93B
+HARD_RGB = (217, 107, 120)   # #D96B78
+
+def difficulty_to_color(difficulty) -> str:
+    """Map a 1-5 difficulty rating to a hex color on a green -> amber -> red scale."""
+    try:
+        t = (float(difficulty) - 1) / 4
+    except (TypeError, ValueError):
+        t = 0.5
+    t = max(0.0, min(1.0, t))
+    if t < 0.5:
+        start, end, frac = EASY_RGB, MID_RGB, t / 0.5
+    else:
+        start, end, frac = MID_RGB, HARD_RGB, (t - 0.5) / 0.5
+    rgb = [round(start[i] + (end[i] - start[i]) * frac) for i in range(3)]
+    return "#{:02X}{:02X}{:02X}".format(*rgb)
+
+def safe_hex(value, fallback: str) -> str:
+    """Only allow #RRGGBB colors, since saved colors end up inside HTML."""
+    if isinstance(value, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
+        return value.upper()
+    return fallback
+
+def readable_text(hex_color: str) -> str:
+    """Pick dark or white text so labels stay readable on any chosen color."""
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    return "#3E313B" if luminance > 0.62 else "#FFFFFF"
+
 # ---------- Course Detection & Cleaning Helpers ----------
+CODE_RE = re.compile(r"^([A-Za-z]{2,5})[\s_-]?(\d{4}[A-Za-z]?)$")
+
+def normalize_course(raw) -> str:
+    """Make course labels consistent: 'Math 2171' / 'math-2171' -> 'MATH 2171'."""
+    raw = str(raw or "").strip()
+    if not raw:
+        return "General"
+    m = CODE_RE.match(raw)
+    if m:
+        return f"{m.group(1).upper()} {m.group(2).upper()}"
+    return raw
+
+IGNORED_PREFIXES = {
+    "QUIZ", "EXAM", "TEST", "LABS", "PART", "WEEK", "UNIT", "PAGE", "XLSB", "FALL", "SPRG",
+    "SPRING", "SUMMER", "WINTER", "TERM", "YEAR",
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "SEPT", "OCT", "NOV", "DEC",
+}
+COURSE_PATTERN = re.compile(r"(?<![A-Z])([A-Z]{2,5})[\s_-]?(\d{4}[A-Z]?)(?![0-9])")
+
 def detect_course_code(text: str) -> str:
     if not text:
         return "General"
-    match = re.search(r"(?<![A-Za-z])([A-Za-z]{2,5})[\s_-]?(\d{3,4}[A-Za-z]?)(?![0-9])", text)
-    if match:
-        dept = match.group(1).upper()
-        if dept not in {"QUIZ", "EXAM", "TEST", "LAB", "HW", "PART", "WEEK", "UNIT", "MOD", "CH", "PAGE"}:
-            return f"{dept} {match.group(2).upper()}"
+    upper = text.upper()
+
+    # 1. Prefer STAT 3122 when cross-listed with MATH-3122 (e.g., 202680-MATH-3122-001:STAT-3122)
+    stat_match = re.search(r"(?<![A-Z])STAT[\s_-]?(\d{4}[A-Z]?)(?![0-9])", upper)
+    if stat_match:
+        return f"STAT {stat_match.group(1)}"
+
+    # 2. Match standard UNCC course codes like MATH-2167, SPAN-1101, ITSC-1212
+    for dept, num in COURSE_PATTERN.findall(upper):
+        if dept not in IGNORED_PREFIXES:
+            return f"{dept} {num}"
+
+    # 3. Catch standalone course keywords like "STATS EXAM 2"
+    if re.search(r"\bSTATS?\b", upper):
+        return "STAT 3122"
+
     return "General"
 
 def clean_canvas_title(raw_summary: str) -> str:
-    cleaned = re.sub(r"\[[^\]]*[A-Za-z]{2,5}[\s_-]?\d{3,4}[^\]]*\]", "", raw_summary).strip()
+    cleaned = re.sub(r"\s*\[20\d{4}-[^\]]*\]?", "", raw_summary).strip()
     return cleaned if cleaned else raw_summary.strip()
 
 # ---------- Database & AI Helpers ----------
@@ -346,46 +455,81 @@ def load_user_df() -> pd.DataFrame:
     res = supabase.table("items").select("*").eq("user_id", user_id).execute()
     if not res.data:
         return pd.DataFrame(columns=["id", "course", "date", "title", "type", "hours", "difficulty", "done"])
+
+    # Sort 'General' items into real courses, normalize labels, and clean Canvas brackets
+    needs_reload = False
+    for row in res.data:
+        curr_course = (row.get("course") or "General").strip() or "General"
+        curr_title = row.get("title") or ""
+        new_course = detect_course_code(curr_title) if curr_course == "General" else curr_course
+        new_course = normalize_course(new_course)
+        new_title = clean_canvas_title(curr_title)
+
+        if new_course != curr_course or new_title != curr_title:
+            supabase.table("items").update({
+                "course": new_course,
+                "title": new_title,
+            }).eq("id", row["id"]).execute()
+            needs_reload = True
+
+    if needs_reload:
+        res = supabase.table("items").select("*").eq("user_id", user_id).execute()
+
     df = pd.DataFrame(res.data)
-    if "course" not in df.columns:
-        df["course"] = "General"
     df["course"] = df["course"].fillna("General").replace("", "General")
     df["date"] = pd.to_datetime(df["date"])
     df["hours"] = df["hours"].astype(float)
     df["difficulty"] = df["difficulty"].astype(int)
     return df
 
-def add_rows_dedup(new_rows: list[dict]) -> int:
+def add_rows_dedup(new_rows: list[dict]) -> tuple[int, int]:
+    """Insert new rows and skip duplicates.
+
+    Returns (rows added, existing rows moved out of 'General' into a real course).
+    """
     if not new_rows:
-        return 0
+        return 0, 0
     existing = load_user_df()
-    existing_keys = set()
+    existing_map = {}
     if not existing.empty:
-        existing_keys = set(
-            zip(existing["date"].dt.strftime("%Y-%m-%d"), existing["title"].str.strip().str.lower())
-        )
+        for _, r in existing.iterrows():
+            key = (r["date"].strftime("%Y-%m-%d"), str(r["title"]).strip().lower())
+            existing_map[key] = (int(r["id"]), r["course"])
 
     unique_rows = []
+    recategorized = 0
     for row in new_rows:
-        clean_title = str(row.get("title", "Untitled")).strip().replace(",", " ")
+        clean_title = clean_canvas_title(str(row.get("title", "Untitled")).strip().replace(",", " "))
         date_str = str(row.get("date"))[:10]
+        course = normalize_course(row.get("course"))
+        if course == "General":
+            course = detect_course_code(str(row.get("title", "")))
         key = (date_str, clean_title.lower())
-        if key not in existing_keys:
-            existing_keys.add(key)
-            unique_rows.append({
-                "user_id": user_id,
-                "course": str(row.get("course") or "General").strip() or "General",
-                "date": date_str,
-                "title": clean_title,
-                "type": row.get("type", "assignment"),
-                "hours": float(row.get("hours", 1.5)),
-                "difficulty": int(row.get("difficulty", 3)),
-                "done": row.get("done", "no"),
-            })
+
+        if key in existing_map:
+            # Already imported. If it was filed under General and we now know the course, fix it.
+            row_id, old_course = existing_map[key]
+            if row_id is not None and old_course == "General" and course != "General":
+                supabase.table("items").update({"course": course}).eq("id", row_id).execute()
+                existing_map[key] = (row_id, course)
+                recategorized += 1
+            continue
+
+        existing_map[key] = (None, course)
+        unique_rows.append({
+            "user_id": user_id,
+            "course": course,
+            "date": date_str,
+            "title": clean_title,
+            "type": row.get("type", "assignment"),
+            "hours": float(row.get("hours", 1.5)),
+            "difficulty": int(row.get("difficulty", 3)),
+            "done": row.get("done", "no"),
+        })
 
     if unique_rows:
         supabase.table("items").insert(unique_rows).execute()
-    return len(unique_rows)
+    return len(unique_rows), recategorized
 
 def parse_ics_url(ics_url: str) -> list[dict]:
     resp = requests.get(ics_url.strip(), timeout=15)
@@ -541,7 +685,7 @@ with st.sidebar:
 
     nav_page = st.radio(
         "Navigation",
-        ["Dashboard", "Workload Forecast", "Full Calendar", "Master Task Editor", "AI Study Coach"],
+        ["Dashboard", "Workload Forecast", "Full Calendar", "Master Task Editor", "Courses", "AI Study Coach"],
         label_visibility="collapsed",
     )
 
@@ -552,35 +696,21 @@ with st.sidebar:
         if st.button("Sync Calendar") and ics_link:
             try:
                 imported = parse_ics_url(ics_link)
-                added_count = add_rows_dedup(imported)
-                st.success(f"Added {added_count} new events!")
+                added_count, sorted_count = add_rows_dedup(imported)
+                flash(f"Added {added_count} new events and sorted {sorted_count} existing events into their courses.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Sync failed: {e}")
 
-        if st.button("Auto-Tag Existing 'General' Items"):
-            existing_gen = supabase.table("items").select("*").eq("user_id", user_id).eq("course", "General").execute().data
-            updated = 0
-            for item in existing_gen:
-                detected = detect_course_code(item["title"])
-                if detected != "General":
-                    supabase.table("items").update({
-                        "course": detected,
-                        "title": clean_canvas_title(item["title"]),
-                    }).eq("id", item["id"]).execute()
-                    updated += 1
-            st.success(f"Organized {updated} items into their courses!")
-            st.rerun()
-
     with st.expander("AI Syllabus Extractor"):
-        course_tag = st.text_input("Course Tag (optional)", placeholder="e.g., ITSC 3155")
+        course_tag = st.text_input("Course Tag (optional)", placeholder="e.g., MATH 2171")
         syl_file = st.file_uploader("PDF, Word (.docx), or Image", type=["pdf", "docx", "png", "jpg", "jpeg"])
         syl_text = st.text_area("Or paste syllabus text", height=80)
         if st.button("Extract Deadlines") and (syl_file is not None or syl_text.strip()):
             try:
                 extracted = parse_syllabus_multimodal(syl_file, syl_text, course_tag)
-                added_count = add_rows_dedup(extracted)
-                st.success(f"Added {added_count} new items!")
+                added_count, _ = add_rows_dedup(extracted)
+                flash(f"Added {added_count} new items!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Extraction failed: {e}")
@@ -611,16 +741,16 @@ with st.sidebar:
         new_exam_sp = st.slider("Exam Prep Spread (days)", 2, 14, exam_spread)
         new_assign_sp = st.slider("Assignment Spread (days)", 1, 10, assign_spread)
         if st.button("Save Settings"):
-            res = supabase.auth.update_user({
-                "data": {
+            try:
+                save_profile_meta({
                     "full_name": updated_name.strip() or display_name,
                     "daily_capacity": new_cap,
                     "exam_spread": new_exam_sp,
                     "assign_spread": new_assign_sp,
-                }
-            })
-            st.session_state["user"] = res.user
-            st.rerun()
+                })
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not save settings: {e}")
 
     st.divider()
     if st.button("Log Out", use_container_width=True):
@@ -628,6 +758,8 @@ with st.sidebar:
         st.session_state["user"] = None
         st.session_state["session"] = None
         st.rerun()
+
+show_flash()
 
 # ---------- Load Data & Top Header Row ----------
 df = load_user_df()
@@ -675,14 +807,35 @@ if df.empty:
     st.info("Your schedule is empty! Use the AI Quick-Add bar above or the left sidebar to import Canvas/Google Calendar or upload a syllabus.")
     st.stop()
 
-# Course Filter Pills
+# ---------- Course Colors ----------
 all_courses = sorted(df["course"].unique().tolist())
+course_avg = df.groupby("course")["difficulty"].mean().to_dict()
+
+def course_color(course: str) -> str:
+    """Your own color if you picked one, otherwise green -> red from the course's difficulty."""
+    pref = course_prefs.get(course) or {}
+    auto = difficulty_to_color(pref.get("difficulty", course_avg.get(course, 3)))
+    if pref.get("custom"):
+        return safe_hex(pref.get("color"), auto)
+    return auto
+
+def course_badge(course: str) -> str:
+    color = course_color(course)
+    return f'<span class="pill-badge" style="background-color:{color}; color:{readable_text(color)};">{esc(course)}</span>'
+
+# Course Filter Pills
 selected_courses = st.multiselect("Active Courses", options=all_courses, default=all_courses, label_visibility="collapsed")
 filtered_df = df[df["course"].isin(selected_courses)].copy()
 
 if filtered_df.empty:
     st.warning("Select at least one course above.")
     st.stop()
+
+chips_html = "".join(
+    f'<span class="course-chip" style="background-color:{course_color(c)}; color:{readable_text(course_color(c))};">{esc(c)}</span>'
+    for c in selected_courses
+)
+render_html(f'<div class="chip-row">{chips_html}</div>')
 
 # ---------- Compute Workload & Completion Metrics ----------
 filtered_df["effort"] = filtered_df["hours"] * (0.5 + filtered_df["difficulty"] * 0.25)
@@ -737,7 +890,7 @@ if nav_page == "Dashboard":
                 rows_html = '<div class="pill-row"><span class="pill-sub">All caught up on urgent tasks!</span></div>'
             else:
                 rows_html = "".join(
-                    f'<div class="pill-row"><div class="pill-left"><span class="pill-badge">{esc(r["course"])}</span><span class="pill-title">{esc(r["title"])}</span></div><span class="pill-sub">Diff {int(r["difficulty"])}/5</span></div>'
+                    f'<div class="pill-row"><div class="pill-left">{course_badge(r["course"])}<span class="pill-title">{esc(r["title"])}</span></div><span class="pill-sub">Diff {int(r["difficulty"])}/5</span></div>'
                     for _, r in urgent.iterrows()
                 )
             render_html(f'<div class="bento-card"><div class="bento-title">Priority Focus</div>{rows_html}</div>')
@@ -751,7 +904,7 @@ if nav_page == "Dashboard":
                 up_html = '<div class="pill-row"><span class="pill-sub">No upcoming deadlines scheduled.</span></div>'
             else:
                 up_html = "".join(
-                    f'<div class="pill-row"><div class="pill-left"><span class="pill-badge">{r["date"].strftime("%b %d")}</span><span class="pill-title">{esc(r["title"])}</span></div><span class="pill-sub">{r["hours"]}h</span></div>'
+                    f'<div class="pill-row"><div class="pill-left"><span class="course-dot" style="background-color:{course_color(r["course"])};"></span><span class="pill-badge">{r["date"].strftime("%b %d")}</span><span class="pill-title">{esc(r["title"])}</span></div><span class="pill-sub">{r["hours"]}h</span></div>'
                     for _, r in upcoming.iterrows()
                 )
             render_html(f'<div class="bento-card"><div class="bento-title">Upcoming Events</div>{up_html}</div>')
@@ -767,7 +920,7 @@ if nav_page == "Dashboard":
             sched_pills = '<div class="pill-row"><span class="pill-sub">No events left this week.</span></div>'
         else:
             sched_pills = "".join(
-                f'<div class="pill-row"><div class="pill-left"><div class="date-circle">{r["date"].day}</div><div><div class="pill-title">{esc(r["title"])}</div><div class="pill-sub">{esc(r["course"])} • {esc(r["type"]).capitalize()}</div></div></div><span class="pill-sub">{r["hours"]}h</span></div>'
+                f'<div class="pill-row"><div class="pill-left"><div class="date-circle" style="border:3px solid {course_color(r["course"])};">{r["date"].day}</div><div><div class="pill-title">{esc(r["title"])}</div><div class="pill-sub">{esc(r["course"])} • {esc(r["type"]).capitalize()}</div></div></div><span class="pill-sub">{r["hours"]}h</span></div>'
                 for _, r in next_three.iterrows()
             )
 
@@ -801,10 +954,9 @@ if nav_page == "Dashboard":
         st.plotly_chart(fig, use_container_width=True)
 
     with right_rail:
-        ring_colors = ["#EB7A88", "#65C3BA", "#F0B95B", "#9CC5E9"]
-        rings_html = render_progress_ring("Overall Coursework", overall_pct, ring_colors[0])
-        for idx, (c_name, c_pct) in enumerate(course_stats):
-            rings_html += render_progress_ring(c_name, c_pct, ring_colors[(idx + 1) % len(ring_colors)])
+        rings_html = render_progress_ring("Overall Coursework", overall_pct, "#EB7A88")
+        for c_name, c_pct in course_stats:
+            rings_html += render_progress_ring(c_name, c_pct, course_color(c_name))
 
         render_html(
             f'<div class="plum-panel">{rings_html}'
@@ -838,15 +990,24 @@ elif nav_page == "Workload Forecast":
     else:
         course_daily = raw_daily.groupby(["date", "course"], as_index=False)["load"].sum()
         course_daily["intensity"] = (course_daily["load"] / max_reference_effort * 10).clip(0, 10).round(2)
-        fig_stack = px.area(course_daily, x="date", y="intensity", color="course")
+        fig_stack = px.area(
+            course_daily, x="date", y="intensity", color="course",
+            color_discrete_map={c: course_color(c) for c in course_daily["course"].unique()},
+        )
         fig_stack.update_layout(paper_bgcolor="#EBE4E6", plot_bgcolor="#F7F3EE", yaxis=dict(range=[0, 10.6]), height=430)
         st.plotly_chart(fig_stack, use_container_width=True)
 
 elif nav_page == "Full Calendar":
     st.subheader("Interactive Semester Calendar")
+    color_mode = st.radio("Color events by", ["Course", "Difficulty"], horizontal=True)
     cal_events = []
     for _, r in filtered_df.iterrows():
-        bg = "#9ca3af" if r["done"] == "yes" else ("#D96B78" if r["difficulty"] >= 4 else ("#E5A93B" if r["difficulty"] == 3 else "#5BB396"))
+        if r["done"] == "yes":
+            bg = "#9ca3af"
+        elif color_mode == "Course":
+            bg = course_color(r["course"])
+        else:
+            bg = "#D96B78" if r["difficulty"] >= 4 else ("#E5A93B" if r["difficulty"] == 3 else "#5BB396")
         cal_events.append({
             "title": f"[{r['course']}] {r['title']} ({r['hours']}h)",
             "start": r["date"].strftime("%Y-%m-%d"),
@@ -857,7 +1018,7 @@ elif nav_page == "Full Calendar":
     calendar(
         events=cal_events,
         options={"initialView": "dayGridMonth", "headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth,listWeek"}, "height": 620},
-        key="full_cal_grid",
+        key=f"full_cal_grid_{color_mode}",
     )
 
 elif nav_page == "Master Task Editor":
@@ -900,7 +1061,7 @@ elif nav_page == "Master Task Editor":
             ):
                 supabase.table("items").update({
                     "done": "yes" if row["done"] else "no",
-                    "course": str(row["course"]).strip() or "General",
+                    "course": normalize_course(row["course"]),
                     "date": str(row["date"]),
                     "title": str(row["title"]).strip(),
                     "type": row["type"],
@@ -909,6 +1070,94 @@ elif nav_page == "Master Task Editor":
                 }).eq("id", rid).execute()
         st.success("Saved!")
         st.rerun()
+
+elif nav_page == "Courses":
+    st.subheader("Course Colors & Difficulty")
+    st.caption("Rate how hard each course is and it gets a color from green (easy) to red (hard). Want your own color? Tick \"Use my own color\" and pick one.")
+    render_html(
+        '<div style="height:12px; border-radius:999px; background:linear-gradient(90deg, #5BB396, #E5A93B, #D96B78); margin:8px 0 4px 0;"></div>'
+        '<div style="display:flex; justify-content:space-between; font-size:0.75rem; color:#7D6B78; margin-bottom:14px;">'
+        '<span>1 · Easy</span><span>3 · Moderate</span><span>5 · Hard</span></div>'
+    )
+
+    with st.form("course_prefs_form"):
+        h1, h2, h3, h4 = st.columns([2, 3, 1.7, 1.2])
+        h1.caption("Course")
+        h2.caption("Difficulty (1 easy, 5 hard)")
+        h3.caption("Use my own color")
+        h4.caption("Color")
+
+        new_prefs = {}
+        for c in all_courses:
+            pref = course_prefs.get(c) or {}
+            default_diff = max(1, min(5, int(pref.get("difficulty", round(course_avg.get(c, 3))))))
+            auto_color = difficulty_to_color(default_diff)
+
+            c1, c2, c3, c4 = st.columns([2, 3, 1.7, 1.2])
+            with c1:
+                render_html(
+                    f'<span class="course-chip" style="background-color:{course_color(c)}; color:{readable_text(course_color(c))};">{esc(c)}</span>'
+                )
+            diff_val = c2.slider(
+                f"Difficulty for {c}", 1, 5, default_diff, key=f"pref_diff_{c}", label_visibility="collapsed",
+            )
+            use_custom = c3.checkbox(
+                f"Use my own color for {c}", value=bool(pref.get("custom", False)), key=f"pref_custom_{c}",
+                label_visibility="collapsed",
+            )
+            picked = c4.color_picker(
+                f"Color for {c}", value=safe_hex(pref.get("color"), auto_color), key=f"pref_color_{c}",
+                label_visibility="collapsed",
+            )
+            new_prefs[c] = {"difficulty": int(diff_val), "custom": bool(use_custom), "color": picked}
+
+        saved = st.form_submit_button("Save course colors", type="primary")
+
+    if saved:
+        try:
+            save_profile_meta({"course_prefs": {**course_prefs, **new_prefs}})
+            flash("Course colors saved.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not save course colors: {e}")
+
+    if course_prefs and st.button("Reset all to automatic colors"):
+        try:
+            save_profile_meta({"course_prefs": {}})
+            flash("Course colors reset to the green to red scale.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not reset course colors: {e}")
+
+    st.divider()
+    st.markdown("#### Rename or merge a course")
+    st.caption("Wrong label? Rename a course, or type the name of another course to merge the two. To move a single task, change its course in the Master Task Editor.")
+    counts = (
+        df.groupby("course").size().reset_index(name="Tasks").rename(columns={"course": "Course"})
+    )
+    st.dataframe(counts, hide_index=True, use_container_width=True)
+
+    rn1, rn2 = st.columns(2)
+    old_name = rn1.selectbox("Course to rename", all_courses, key="rename_old")
+    new_name_raw = rn2.text_input("New name", placeholder="e.g., MATH 2171", key="rename_new")
+    if st.button("Rename course"):
+        target = normalize_course(new_name_raw)
+        if not new_name_raw.strip():
+            st.warning("Type the new course name first.")
+        elif target == old_name:
+            st.info("That is already the course name.")
+        else:
+            try:
+                supabase.table("items").update({"course": target}).eq("user_id", user_id).eq("course", old_name).execute()
+                if old_name in course_prefs:
+                    moved = dict(course_prefs)
+                    moved.setdefault(target, moved[old_name])
+                    moved.pop(old_name, None)
+                    save_profile_meta({"course_prefs": moved})
+                flash(f"Renamed {old_name} to {target}.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not rename the course: {e}")
 
 elif nav_page == "AI Study Coach":
     st.subheader("AI Crunch-Week Study Plan Generator")
