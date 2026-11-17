@@ -227,7 +227,7 @@ for _, row in df.iterrows():
 
 load_df = pd.DataFrame(daily_records).groupby("date", as_index=False)["load"].sum()
 full_range = pd.date_range(load_df["date"].min(), load_df["date"].max(), freq="D")
-load_df = load_df.set_index(mean"date").reindex(full_range, fill_value=0.0).rename_axis("date").reset_index()
+load_df = load_df.set_index("date").reindex(full_range, fill_value=0.0).rename_axis("date").reset_index()
 
 # Normalize daily load onto a clean 0–10 scale (10 = heavy crunch day, e.g., ~15+ weighted effort hours)
 MAX_REFERENCE_EFFORT = 15.0
