@@ -216,7 +216,7 @@ def parse_syllabus_multimodal(uploaded_file=None, pasted_text: str = "", default
         contents.append(pasted_text.strip()[:18000])
 
     # Inside parse_syllabus_multimodal:
-response = client.models.generate_content(model="gemini-3.8-flash", contents=contents)
+    response = client.models.generate_content(model="gemini-3.8-flash", contents=contents)
     raw = response.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(raw)
 
