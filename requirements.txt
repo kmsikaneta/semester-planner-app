@@ -5,5 +5,7 @@ icalendar
 recurring-ical-events
 requests
 pypdf
+python-docx
+Pillow
 google-genai
 supabase
