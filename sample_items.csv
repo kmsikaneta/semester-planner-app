@@ -1,0 +1,12 @@
+date,title,type,hours,difficulty,done
+2026-11-16,Calculus lecture,recurring,1.25,4,no
+2026-11-16,Chemistry lab,recurring,2.0,3,no
+2026-11-17,Intro CS lecture,recurring,1.25,3,no
+2026-11-18,Problem set 7,assignment,3.0,3,no
+2026-11-19,Gym,recurring,1.0,1,no
+2026-11-20,Statistics quiz,exam,2.0,3,no
+2026-11-21,Work shift,job,5.0,2,no
+2026-11-23,Group project,assignment,5.0,4,no
+2026-11-24,Calculus midterm,exam,10.0,5,no
+2026-11-30,Chemistry exam,exam,8.0,4,no
+2026-12-04,CS final project,assignment,8.0,5,no
